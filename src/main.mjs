@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { appendFile, mkdir, realpath } from 'node:fs/promises';
+import { appendFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -13,6 +13,11 @@ import { isExecutableProcess, parseProcessSnapshot } from './process-snapshot.mj
 import { acquireAssistantLock } from './single-instance-lock.mjs';
 import { compatibilityErrorCode } from './compatibility-policy.mjs';
 import { isDirectExecution } from './entry-point.mjs';
+import { createVaultSettingsStore, DEFAULT_VAULT_ROOT } from './vault-settings.mjs';
+import { formatLaunchFailure } from './launch-diagnostics.mjs';
+import { createCompatibilityCache } from './compatibility-cache.mjs';
+import { requestedDebuggingPorts } from './cdp-args.mjs';
+import { restorePrecondition } from './restore-policy.mjs';
 
 const execFileAsync = promisify(execFile);
 function runtimeError(code) {
@@ -21,8 +26,6 @@ function runtimeError(code) {
   return error;
 }
 const TEAM_ID = '2DC432GLL2';
-const VAULT_NAME = 'ExampleVault';
-const VAULT_ROOT = '/Users/example/ExampleVault';
 export const ASSISTANT_STATE_ROOT = path.join(os.homedir(), 'Library/Application Support/CodexObsidianLinkAssistant');
 const STATE_ROOT = ASSISTANT_STATE_ROOT;
 const LOG_PATH = path.join(STATE_ROOT, 'assistant.log');
@@ -37,6 +40,8 @@ const openDebounce = new Map();
 let stopping = false;
 let cliLock = null;
 let sessionCleanupPromise = null;
+// 签名与ASAR哈希只随bundle文件变化，按元数据缓存避免每次inspect都重算643 MB。
+const compatibilityCache = createCompatibilityCache();
 
 async function run(file, args, options = {}) {
   const { stdout = '', stderr = '' } = await execFileAsync(file, args, {
@@ -51,6 +56,11 @@ async function log(event, detail = '') {
   await mkdir(STATE_ROOT, { recursive: true, mode: 0o700 });
   const line = `${new Date().toISOString()} ${event}${detail ? ` ${detail}` : ''}\n`;
   await appendFile(LOG_PATH, line, { mode: 0o600 });
+}
+
+/** 追加一条单行日志；日志不可写时静默失败，不改变调用方结果。 */
+export async function appendAssistantLog(event, detail = '') {
+  try { await log(event, detail); } catch { /* 日志目录不可写时保持原流程 */ }
 }
 
 async function bundleValue(bundle, key) {
@@ -121,17 +131,10 @@ function isDescendantOrSelf(pid, rootPid, snapshot) {
   return false;
 }
 
-function requestedPorts(command) {
-  const match = command.match(/--remote-debugging-port(?:=|\s+)(\d{1,5})(?:\s|$)/u);
-  if (!match || !command.includes('--remote-debugging-address=127.0.0.1')) return [];
-  const port = Number(match[1]);
-  return port >= 1024 && port <= 65535 ? [port] : [];
-}
-
 async function trustedEndpoint(processes, snapshot) {
   if (processes.length !== 1) return null;
   const [process] = processes;
-  const ports = requestedPorts(process.command);
+  const ports = requestedDebuggingPorts(process.command);
   if (!ports.length) return null;
   const openListeners = await listeners();
   for (const port of ports) {
@@ -174,8 +177,16 @@ async function availablePort() {
 }
 
 async function launchCodex(bundle, port) {
-  await run('/usr/bin/open', ['-na', bundle, '--args',
-    '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${port}`]);
+  try {
+    await run('/usr/bin/open', ['-na', bundle, '--args',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${port}`]);
+    try { await log('codex-launch-opened', `port=${port}`); } catch { /* 日志失败不改变启动结果 */ }
+  } catch (error) {
+    try {
+      await log('codex-launch-failed', `bundle=${bundle} port=${port} ${formatLaunchFailure(error)}`);
+    } catch { /* 日志失败不覆盖启动错误 */ }
+    throw runtimeError('CODEX_LAUNCH_FAILED');
+  }
 }
 
 async function waitForTrustedEndpoint(executable, port, timeoutMs = 45000, { signal = null } = {}) {
@@ -192,6 +203,7 @@ async function waitForTrustedEndpoint(executable, port, timeoutMs = 45000, { sig
     error.code = 'ASSISTANT_STOPPING';
     throw error;
   }
+  try { await log('codex-launch-timeout', `port=${port}`); } catch { /* 日志失败不覆盖超时错误 */ }
   throw runtimeError('CDP_TIMEOUT');
 }
 
@@ -226,7 +238,10 @@ function copyTextToClipboard(text) {
   });
 }
 
-async function executeLinkAction(payload, port, session, executionContextId) {
+async function executeLinkAction(payload, port, session, executionContextId, {
+  vaultSettingsStore, targetRevision, getCurrentRevision,
+}) {
+  if (targetRevision !== getCurrentRevision()) return;
   if (typeof payload !== 'string' || payload.length > 8192) return;
   let request;
   try { request = JSON.parse(payload); } catch { return; }
@@ -245,7 +260,13 @@ async function executeLinkAction(payload, port, session, executionContextId) {
     || !/^tooltip-[1-9]\d{0,11}$/u.test(request.token))) return;
   const now = Date.now();
   if (action === 'open' && now - (openDebounce.get(request.href) ?? 0) < 1200) return;
-  const obsidianUri = await resolveVaultFileHref(request.href, { vaultRoot: VAULT_ROOT, vaultName: VAULT_NAME });
+  const settings = await vaultSettingsStore.read();
+  if (!settings.configured || targetRevision !== getCurrentRevision()) return;
+  const obsidianUri = await resolveVaultFileHref(request.href, {
+    vaultRoot: settings.vaultRoot,
+    vaultName: settings.vaultName,
+  });
+  if (targetRevision !== getCurrentRevision()) return;
   if (!obsidianUri) {
     if (action === 'tooltip') {
       const clearTitle = `window.__codexObsidianLinkAssistantV1?.setTooltip(${JSON.stringify(request.token)}, '')`;
@@ -291,7 +312,7 @@ function probeExpression() {
   ))()`;
 }
 
-async function attachTarget(target, port, vaultFileUrlPrefix) {
+async function attachTarget(target, port, vaultRoot, vaultSettingsStore, targetRevision, getCurrentRevision) {
   const session = new CdpSession(target, port);
   const worldName = 'codex-obsidian-link-assistant-v1';
   const bindingName = `openObsidianNote${randomBytes(6).toString('hex')}`;
@@ -319,10 +340,12 @@ async function attachTarget(target, port, vaultFileUrlPrefix) {
 
     session.on('Runtime.bindingCalled', ({ name, payload, executionContextId }) => {
       if (name !== bindingName || !executionContexts.has(executionContextId)) return;
-      void executeLinkAction(payload, port, session, executionContextId);
+      void executeLinkAction(payload, port, session, executionContextId, {
+        vaultSettingsStore, targetRevision, getCurrentRevision,
+      });
     });
     await session.send('Runtime.addBinding', { name: bindingName, executionContextName: worldName });
-    const source = buildRendererSource({ bindingName, vaultFileUrlPrefix });
+    const source = buildRendererSource({ bindingName, vaultRoot });
     const registered = await session.send('Page.addScriptToEvaluateOnNewDocument', {
       source,
       worldName,
@@ -397,22 +420,27 @@ function waitForInterval(milliseconds, signal) {
   });
 }
 
-async function supervise(bundle, runtime, port, { signal = null, onFirstPass = () => {} } = {}) {
-  const vaultRoot = await realpath(VAULT_ROOT);
-  const vaultFileUrlPrefix = new URL(`file://${vaultRoot.replace(/\/$/u, '')}/`).href;
+async function supervise(bundle, runtime, port, {
+  signal = null, onFirstPass = () => {}, vaultSettingsStore,
+} = {}) {
   await log('assistant-starting', `codex=${await bundleValue(bundle, 'CFBundleShortVersionString')} port=${port}`);
   notify('正在连接Codex页面…');
   const endpoint = await waitForTrustedEndpoint(runtime.executable, port, 45000, { signal });
   let consecutiveErrors = 0;
   let firstPass = false;
+  let codexExited = false;
   while (!stopping && !signal?.aborted) {
     try {
       const snapshot = await processSnapshot();
       if (findCodexProcesses(snapshot, runtime.executable).length === 0) {
         await log('codex-exited', 'assistant-stopping');
+        codexExited = true;
         break;
       }
       const current = await listCodexPageTargets(endpoint.port);
+      const settings = await vaultSettingsStore.read();
+      const targetRevision = vaultSettingsStore.revision;
+      const getCurrentRevision = () => vaultSettingsStore.revision;
       const active = new Set(current.map((target) => target.id));
       for (const [id, record] of sessions) {
         if (!active.has(id) || record.session.closed) {
@@ -420,10 +448,12 @@ async function supervise(bundle, runtime, port, { signal = null, onFirstPass = (
           sessions.delete(id);
         }
       }
-      for (const target of current) {
+      for (const target of settings.configured ? current : []) {
         if (sessions.has(target.id)) continue;
         try {
-          const record = await attachTarget(target, endpoint.port, vaultFileUrlPrefix);
+          const record = await attachTarget(
+            target, endpoint.port, settings.vaultRoot, vaultSettingsStore, targetRevision, getCurrentRevision,
+          );
           if (record) sessions.set(target.id, record);
         } catch { await log('target-rejected', 'reason=probe-or-injection-failed'); }
       }
@@ -447,6 +477,7 @@ async function supervise(bundle, runtime, port, { signal = null, onFirstPass = (
     await waitForInterval(Math.min(5000, 1000 + consecutiveErrors * 500), signal);
   }
   await cleanupSessions();
+  return { reason: codexExited ? 'codex-exited' : 'stopped' };
 }
 
 async function runAssistant() {
@@ -454,7 +485,9 @@ async function runAssistant() {
   if (stopping) return;
   const runtime = await verifySignedRuntime(bundle);
   if (stopping) return;
-  const vaultRoot = await realpath(VAULT_ROOT);
+  const vaultSettingsStore = createVaultSettingsStore({ stateRoot: ASSISTANT_STATE_ROOT });
+  const vaultSettings = await vaultSettingsStore.read();
+  if (!vaultSettings.configured) throw runtimeError(vaultSettings.errorCode ?? 'VAULT_NOT_CONFIGURED');
   const snapshot = await processSnapshot();
   if (stopping) return;
   let processes = findCodexProcesses(snapshot, runtime.executable);
@@ -484,9 +517,8 @@ async function runAssistant() {
   }
   if (stopping) return;
   const selectedPort = endpoint.port;
-  const vaultFileUrlPrefix = new URL(`file://${vaultRoot.replace(/\/$/u, '')}/`).href;
   await log('cdp-verified', `port=${selectedPort} targets=${endpoint.targets.length}`);
-  await supervise(bundle, runtime, selectedPort);
+  await supervise(bundle, runtime, selectedPort, { vaultSettingsStore });
 }
 
 async function fileSha256(filePath) {
@@ -511,7 +543,10 @@ function processFingerprint(process, executable, port) {
   })).digest('hex');
 }
 
-function runtimeState({ codex, cdp, pageCount = 0, version, build, port = null, launchSource, errorCode = null }) {
+function runtimeState({
+  codex, cdp, pageCount = 0, version, build, port = null, launchSource, errorCode = null,
+  vaultConfigured = false, vaultRoot = null, vaultName = null, recommendedVaultRoot = null,
+}) {
   return {
     codex,
     cdp,
@@ -521,6 +556,10 @@ function runtimeState({ codex, cdp, pageCount = 0, version, build, port = null, 
     port,
     launchSource,
     errorCode,
+    vaultConfigured,
+    vaultRoot,
+    vaultName,
+    recommendedVaultRoot,
   };
 }
 
@@ -535,20 +574,53 @@ async function getOneProcess(executable) {
  * 菜单App专用runtime。所有状态变更动作都先复核签名、版本、ASAR和唯一进程身份；
  * inspect只读取状态，不启动/退出Codex、不建立WebSocket或注入页面。
  */
-export function createCodexRuntime({ compatibility } = {}) {
+export function createCodexRuntime({
+  compatibility,
+  vaultSettingsStore = createVaultSettingsStore({ stateRoot: ASSISTANT_STATE_ROOT }),
+  onSupervisorExit = null,
+} = {}) {
   let managedProcessFingerprint = null;
   let managedSupervisor = null;
+  let vaultSettings = null;
+
+  function stateFor(fields) {
+    const selectedVaultRoot = vaultSettings?.vaultRoot ?? null;
+    return runtimeState({
+      ...fields,
+      errorCode: fields.errorCode ?? vaultSettings?.errorCode ?? null,
+      vaultConfigured: vaultSettings?.configured === true,
+      vaultRoot: selectedVaultRoot,
+      vaultName: vaultSettings?.vaultName ?? null,
+      recommendedVaultRoot: vaultSettings ? vaultSettings.recommendedVaultRoot : DEFAULT_VAULT_ROOT,
+    });
+  }
 
   async function inspect() {
+    vaultSettings = await vaultSettingsStore.read();
     let bundle;
     try { bundle = await findCodexBundle(); } catch { throw runtimeError('CODEX_NOT_FOUND'); }
-    const bundleId = await bundleValue(bundle, 'CFBundleIdentifier');
-    const runtime = await verifySignedRuntime(bundle);
-    const [version, build, asarSha256] = await Promise.all([
-      bundleValue(bundle, 'CFBundleShortVersionString'),
-      bundleValue(bundle, 'CFBundleVersion'),
-      fileSha256(path.join(bundle, 'Contents/Resources/app.asar')),
-    ]);
+    const plistPath = path.join(bundle, 'Contents/Info.plist');
+    const asarPath = path.join(bundle, 'Contents/Resources/app.asar');
+    const nodePath = path.join(bundle, 'Contents/Resources/cua_node/bin/node');
+    const executableName = await bundleValue(bundle, 'CFBundleExecutable');
+    const compatibilityFacts = await compatibilityCache.getOrCompute([
+      plistPath,
+      path.join(bundle, 'Contents/MacOS', executableName),
+      nodePath,
+      asarPath,
+    ], async () => {
+      const bundleId = await bundleValue(bundle, 'CFBundleIdentifier');
+      const runtime = await verifySignedRuntime(bundle);
+      const [version, build, asarSha256] = await Promise.all([
+        bundleValue(bundle, 'CFBundleShortVersionString'),
+        bundleValue(bundle, 'CFBundleVersion'),
+        fileSha256(asarPath),
+      ]);
+      return { bundleId, runtime, version, build, asarSha256 };
+    });
+    const { bundleId, runtime, version, build, asarSha256 } = compatibilityFacts;
+    // 所有inspect结果都必须携带bundle/runtime，否则启动动作会把undefined传给open。
+    const withBundleRuntime = (fields) => ({ ...fields, bundle, runtime });
     const compatibilityFailure = compatibilityErrorCode({
       bundleId,
       teamId: TEAM_ID,
@@ -558,70 +630,70 @@ export function createCodexRuntime({ compatibility } = {}) {
       nodeMajor: runtime.major,
     }, compatibility);
     if (compatibilityFailure) {
-      return {
+      return withBundleRuntime({
         mode: compatibilityFailure === 'VERSION_UNSUPPORTED' ? 'incompatible' : 'unknown',
         processFingerprint: null,
         restoreAllowed: false,
-        state: runtimeState({
+        state: stateFor({
           codex: 'unknown', cdp: 'unknown', version, build,
           launchSource: 'unknown', errorCode: compatibilityFailure,
         }),
-      };
+      });
     }
 
     const snapshot = await processSnapshot();
     const processes = findCodexProcesses(snapshot, runtime.executable);
     if (processes.length > 1) {
-      return {
+      return withBundleRuntime({
         mode: 'ambiguous', processFingerprint: null, restoreAllowed: false,
-        state: runtimeState({
+        state: stateFor({
           codex: 'running', cdp: 'unknown', version, build,
           launchSource: 'unknown', errorCode: 'PROCESS_AMBIGUOUS',
         }),
-      };
+      });
     }
     if (processes.length === 0) {
-      return {
+      return withBundleRuntime({
         mode: 'not-running', processFingerprint: null, restoreAllowed: false,
-        state: runtimeState({ codex: 'stopped', cdp: 'closed', version, build, launchSource: 'none' }),
-      };
+        state: stateFor({ codex: 'stopped', cdp: 'closed', version, build, launchSource: 'none' }),
+      });
     }
 
     const [process] = processes;
     const endpoint = await trustedEndpoint(processes, snapshot);
-    const configuredPorts = requestedPorts(process.command);
+    const configuredPorts = requestedDebuggingPorts(process.command);
     const port = endpoint?.port ?? configuredPorts[0] ?? null;
     const fingerprint = processFingerprint(process, runtime.executable, port);
     if (!fingerprint) {
-      return {
+      return withBundleRuntime({
         mode: 'identity-unknown', processFingerprint: null, restoreAllowed: false,
-        state: runtimeState({
+        state: stateFor({
           codex: 'running', cdp: endpoint ? 'verified' : 'closed', version, build, port,
           launchSource: 'unknown', errorCode: 'PROCESS_IDENTITY_UNAVAILABLE',
         }),
-      };
+      });
     }
     if (configuredPorts.length > 0 && !endpoint) {
-      return {
+      return withBundleRuntime({
         mode: 'untrusted-cdp', processFingerprint: fingerprint, restoreAllowed: false,
-        state: runtimeState({
+        state: stateFor({
           codex: 'running', cdp: 'unknown', version, build, port,
           launchSource: 'unknown', errorCode: 'CDP_UNTRUSTED',
         }),
-      };
+      });
     }
     const launchedHere = Boolean(endpoint && managedProcessFingerprint === fingerprint);
     return {
-      mode: endpoint ? 'cdp-ready' : 'ordinary-running',
-      processFingerprint: fingerprint,
-      restoreAllowed: launchedHere,
-      state: runtimeState({
-        codex: 'running', cdp: endpoint ? 'verified' : 'closed',
-        pageCount: endpoint && managedSupervisor ? sessions.size : 0,
-        version, build, port, launchSource: endpoint ? (launchedHere ? 'app' : 'external') : 'external',
+      ...withBundleRuntime({
+        mode: endpoint ? 'cdp-ready' : 'ordinary-running',
+        processFingerprint: fingerprint,
+        restoreAllowed: launchedHere,
+        state: stateFor({
+          codex: 'running', cdp: endpoint ? 'verified' : 'closed',
+          pageCount: endpoint && managedSupervisor ? sessions.size : 0,
+          version, build, port, launchSource: endpoint ? (launchedHere ? 'app' : 'external') : 'external',
+        }),
       }),
-      bundle,
-      runtime,
       endpoint,
     };
   }
@@ -632,15 +704,26 @@ export function createCodexRuntime({ compatibility } = {}) {
     let markReady;
     let rejectReady;
     const ready = new Promise((resolve, reject) => { markReady = resolve; rejectReady = reject; });
-    const supervisor = { controller, done: null };
+    const supervisor = { controller, done: null, readyReached: false };
     supervisor.done = supervise(bundle, runtime, port, {
       signal: controller.signal,
-      onFirstPass: markReady,
-    }).catch((error) => {
+      onFirstPass: () => {
+        supervisor.readyReached = true;
+        markReady();
+      },
+      vaultSettingsStore,
+    }).catch(async (error) => {
+      try { await log('supervisor-failed', `code=${error?.code ?? 'unexpected-error'}`); } catch { /* 日志失败不覆盖原错误 */ }
       rejectReady(error);
       throw error;
     }).finally(() => {
-      if (managedSupervisor === supervisor) managedSupervisor = null;
+      const wasCurrent = managedSupervisor === supervisor;
+      if (wasCurrent) managedSupervisor = null;
+      // 主动停止会先清空managedSupervisor；只有仍然当前的supervisor才算Codex意外退出。
+      if (wasCurrent && !controller.signal.aborted && supervisor.readyReached) {
+        managedProcessFingerprint = null;
+        try { onSupervisorExit?.({ reason: 'supervisor-exited' }); } catch { /* 状态回调失败不改变退出结果 */ }
+      }
     });
     supervisor.done.catch(() => {});
     managedSupervisor = supervisor;
@@ -659,12 +742,13 @@ export function createCodexRuntime({ compatibility } = {}) {
     await cleanupSessions();
   }
 
-  async function launchEnhanced(bundle, runtime, expectedMode = 'not-running') {
+  async function launchWithCdp(bundle, runtime) {
+    if (!bundle || !runtime?.executable) throw runtimeError('STATE_UNAVAILABLE');
     const beforeLaunch = await inspect();
-    if (beforeLaunch.mode !== expectedMode) throw runtimeError('PROCESS_CHANGED');
+    if (beforeLaunch.mode !== 'not-running') throw runtimeError('PROCESS_CHANGED');
     const port = await availablePort();
     const immediatelyBeforeLaunch = await inspect();
-    if (immediatelyBeforeLaunch.mode !== expectedMode) throw runtimeError('PROCESS_CHANGED');
+    if (immediatelyBeforeLaunch.mode !== 'not-running') throw runtimeError('PROCESS_CHANGED');
     await log('codex-launch-requested', `port=${port}`);
     await launchCodex(bundle, port);
     const endpoint = await waitForTrustedEndpoint(runtime.executable, port);
@@ -672,7 +756,8 @@ export function createCodexRuntime({ compatibility } = {}) {
     const fingerprint = processFingerprint(processes[0], runtime.executable, endpoint.port);
     if (!fingerprint) throw runtimeError('PROCESS_IDENTITY_UNAVAILABLE');
     managedProcessFingerprint = fingerprint;
-    await startSupervisor(bundle, runtime, endpoint.port);
+    await log('cdp-verified', `port=${endpoint.port} source=app`);
+    // 启动动作只把Codex带到可验证的CDP状态，注入留给connect动作。
     return await inspect();
   }
 
@@ -704,20 +789,61 @@ export function createCodexRuntime({ compatibility } = {}) {
     throw runtimeError('CODEX_LAUNCH_FAILED');
   }
 
+  async function configureVault({ vaultRoot, wasActive }) {
+    const previous = await vaultSettingsStore.read();
+    const current = wasActive && managedSupervisor ? await inspect() : null;
+    const saved = await vaultSettingsStore.save(vaultRoot);
+    vaultSettings = saved;
+    if (current && managedSupervisor) {
+      await stopSupervisor();
+      try {
+        await startSupervisor(current.bundle, current.runtime, current.state.port);
+      } catch {
+        await stopSupervisor();
+        try {
+          if (!previous.configured) throw runtimeError('VAULT_APPLY_FAILED');
+          await vaultSettingsStore.save(previous.vaultRoot);
+          vaultSettings = await vaultSettingsStore.read();
+          await startSupervisor(current.bundle, current.runtime, current.state.port);
+        } catch {
+          await stopSupervisor();
+          throw runtimeError('VAULT_APPLY_FAILED');
+        }
+        throw runtimeError('INJECTION_FAILED');
+      }
+    }
+    try { return await inspect(); }
+    catch (error) {
+      // 配置独立于Codex进程状态；即使Codex不可用，也把已保存配置回报给浮窗。
+      return {
+        state: stateFor({ codex: 'unknown', cdp: 'unknown', launchSource: 'unknown', errorCode: error?.code }),
+      };
+    }
+  }
+
   return {
     inspect,
-    async enable({ expectedFingerprint = null } = {}) {
+    async launch({ expectedFingerprint = null } = {}) {
       const current = await inspect();
-      if (current.mode === 'ordinary-running' || current.mode === 'ambiguous'
-        || current.mode === 'incompatible' || current.mode === 'identity-unknown'
-        || current.mode === 'untrusted-cdp') {
+      if (!current.state.vaultConfigured) throw runtimeError('VAULT_NOT_CONFIGURED');
+      if (['ordinary-running', 'ambiguous', 'incompatible', 'identity-unknown', 'untrusted-cdp']
+        .includes(current.mode)) {
         throw runtimeError(current.mode === 'ambiguous' ? 'PROCESS_AMBIGUOUS'
           : current.mode === 'incompatible' ? 'VERSION_UNSUPPORTED'
-            : current.mode === 'untrusted-cdp' ? 'CDP_UNTRUSTED' : 'PROCESS_CHANGED');
+            : current.mode === 'untrusted-cdp' ? 'CDP_UNTRUSTED'
+              : current.mode === 'identity-unknown' ? 'PROCESS_IDENTITY_UNAVAILABLE' : 'PROCESS_CHANGED');
       }
+      if (current.mode === 'cdp-ready') return current;
       if (expectedFingerprint !== current.processFingerprint) throw runtimeError('PROCESS_CHANGED');
-      if (current.mode === 'not-running') return launchEnhanced(current.bundle, current.runtime);
-      if (current.mode !== 'cdp-ready') throw runtimeError('STATE_UNAVAILABLE');
+      if (current.mode !== 'not-running') throw runtimeError('STATE_UNAVAILABLE');
+      return launchWithCdp(current.bundle, current.runtime);
+    },
+    async connect() {
+      const current = await inspect();
+      if (!current.state.vaultConfigured) throw runtimeError('VAULT_NOT_CONFIGURED');
+      if (current.mode !== 'cdp-ready') {
+        throw runtimeError(current.mode === 'ambiguous' ? 'PROCESS_AMBIGUOUS' : 'CDP_UNTRUSTED');
+      }
       await startSupervisor(current.bundle, current.runtime, current.state.port);
       return await inspect();
     },
@@ -728,18 +854,22 @@ export function createCodexRuntime({ compatibility } = {}) {
       }
       await quitVerifiedCodex(targetFingerprint, 'ordinary-running');
       managedProcessFingerprint = null;
-      return launchEnhanced(current.bundle, current.runtime);
+      return launchWithCdp(current.bundle, current.runtime);
     },
     async restoreOrdinary({ targetFingerprint, confirmed } = {}) {
       if (confirmed !== true) throw runtimeError('INVALID_CONFIRMATION');
+      // 先确认仍可恢复再撤掉注入，避免目标已变化时先破坏当前增强。
+      const before = await inspect();
+      const beforeFailure = restorePrecondition(before, targetFingerprint);
+      if (beforeFailure) throw runtimeError(beforeFailure);
       await stopSupervisor();
-      const current = await inspect();
-      if (current.mode !== 'cdp-ready' || !current.restoreAllowed
-        || current.processFingerprint !== targetFingerprint) throw runtimeError('PROCESS_CHANGED');
+      const after = await inspect();
+      const afterFailure = restorePrecondition(after, targetFingerprint);
+      if (afterFailure) throw runtimeError(afterFailure);
       await quitVerifiedCodex(targetFingerprint, 'cdp-ready');
       managedProcessFingerprint = null;
-      await run('/usr/bin/open', ['-a', current.bundle]);
-      await waitForCodexProcess(current.runtime.executable);
+      await run('/usr/bin/open', ['-a', after.bundle]);
+      await waitForCodexProcess(after.runtime.executable);
       return await inspect();
     },
     async pause() {
@@ -748,6 +878,7 @@ export function createCodexRuntime({ compatibility } = {}) {
     },
     async resume() {
       const current = await inspect();
+      if (!current.state.vaultConfigured) throw runtimeError('VAULT_NOT_CONFIGURED');
       if (current.mode !== 'cdp-ready') throw runtimeError('CDP_UNTRUSTED');
       await startSupervisor(current.bundle, current.runtime, current.state.port);
       return await inspect();
@@ -756,6 +887,7 @@ export function createCodexRuntime({ compatibility } = {}) {
       await stopSupervisor();
       return await inspect();
     },
+    configureVault,
   };
 }
 

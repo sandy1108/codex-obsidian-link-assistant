@@ -17,6 +17,14 @@ test('decorates only file Markdown links inside the selected vault', () => {
   assert.equal(isVaultMarkdownHref('file:///Users/example/ExampleVault-Evil/note.md', prefix), false);
 });
 
+test('renderer source can discover absolute Codex file references inside a configured Vault', () => {
+  const source = buildRendererSource({ bindingName: 'openObsidianNote9', vaultFileUrlPrefix: prefix });
+  assert.match(source, /isAbsolutePosixPath/u);
+  assert.match(source, /vaultPathBoundary/u);
+  assert.match(source, /data-prompt-link-href/u);
+  assert.match(source, /a\[href\^="\/"\]/u);
+});
+
 test('builds an isolated renderer payload with a validated binding name', () => {
   const source = buildRendererSource({ bindingName: 'openObsidianNote9', vaultFileUrlPrefix: prefix });
   assert.match(source, /window\.top\s*!==\s*window/u);
@@ -91,11 +99,17 @@ test('renderer decorates current Codex prompt-link file references and cleans re
     role: 'button', 'data-prompt-link-href': 'file:///Users/example/ExampleVault-Evil/其他.md',
   });
   const image = new Element('span', '', { role: 'button', 'data-prompt-link-href': `${prefix}image.png` });
+  const posix = new Element('span', '', {
+    role: 'button', 'data-prompt-link-href': `${vaultRoot}目录/原生引用.md:18:4`,
+  });
+  const missing = new Element('span', '', {
+    role: 'button', 'data-prompt-link-href': `${vaultRoot}目录/尚不存在.png`,
+  });
   const queried = new Element('span', '', {
     role: 'button', 'data-prompt-link-href': `${prefix}笔记.md?download=1`,
   });
-  for (const target of [valid, outside, image, queried, legacy]) root.insertBefore(target, null);
-  const targets = [valid, outside, image, queried, legacy];
+  for (const target of [valid, outside, image, posix, missing, queried, legacy]) root.insertBefore(target, null);
+  const targets = [valid, outside, image, posix, missing, queried, legacy];
   const document = {
     documentElement: root,
     querySelectorAll: (selector) => selector.includes('data-prompt-link-href')
@@ -143,7 +157,7 @@ test('renderer decorates current Codex prompt-link file references and cleans re
   });
 
   vm.runInContext(source, context);
-  assert.equal(root.children.filter((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1')).length, 2);
+  assert.equal(root.children.filter((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1')).length, 5);
   const stylesheet = root.children.find((item) => item.hasAttribute('data-codex-obsidian-link-assistant-style-v1'));
   assert.ok(stylesheet);
   assert.match(stylesheet.textContent, /border-radius:\s*999px/u);
@@ -159,7 +173,10 @@ test('renderer decorates current Codex prompt-link file references and cleans re
   assert.match(stylesheet.textContent, /height:\s*1\.8em/u);
   assert.match(stylesheet.textContent, /\[data-codex-obsidian-link-assistant-copy-v1\]\s*\{[^}]*border-radius:\s*0\.35em/u);
   const button = root.children.find((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1'));
-  const legacyButton = root.children.find((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1') && item !== button);
+  const imageButton = root.children.find((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1') && item !== button);
+  const posixButton = root.children.find((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1')
+    && item !== button && item !== imageButton);
+  const legacyButton = root.children.filter((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1')).at(-1);
   const copyButton = root.children.find((item) => item.hasAttribute('data-codex-obsidian-link-assistant-copy-v1'));
   assert.equal(button.textContent, '↗ 在 Obsidian 打开');
   assert.ok(copyButton);
@@ -170,13 +187,33 @@ test('renderer decorates current Codex prompt-link file references and cleans re
   const tooltipRequests = requests.splice(0);
   assert.deepEqual(tooltipRequests, [
     { action: 'tooltip', href: validHref, token: 'tooltip-1' },
-    { action: 'tooltip', href: legacyHref, token: 'tooltip-2' },
+    { action: 'tooltip', href: `${prefix}image.png`, token: 'tooltip-2' },
+    { action: 'tooltip', href: `${vaultRoot}目录/原生引用.md:18:4`, token: 'tooltip-3' },
+    { action: 'tooltip', href: `${vaultRoot}目录/尚不存在.png`, token: 'tooltip-4' },
+    { action: 'tooltip', href: legacyHref, token: 'tooltip-5' },
   ]);
   const tooltipRequest = tooltipRequests.find((request) => request.href === validHref);
   const canonicalUri = 'obsidian://open?vault=ExampleVault&file=目录/笔记.md';
   assert.equal(pageWindow.__codexObsidianLinkAssistantV1.setTooltip(tooltipRequest.token, canonicalUri), true);
   assert.equal(button.title, canonicalUri);
   assert.equal(copyButton.title, canonicalUri);
+  for (const href of [`${prefix}image.png`, `${vaultRoot}目录/原生引用.md:18:4`, legacyHref]) {
+    const tooltip = tooltipRequests.find((request) => request.href === href);
+    assert.ok(tooltip);
+    assert.equal(pageWindow.__codexObsidianLinkAssistantV1.setTooltip(tooltip.token, canonicalUri), true);
+  }
+  assert.equal(imageButton.hidden, false);
+  assert.equal(posixButton.hidden, false);
+  const missingTooltip = tooltipRequests.find((request) => request.href.endsWith('尚不存在.png'));
+  const missingButton = root.children.find((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1')
+    && item.hidden);
+  assert.ok(missingButton);
+  pageWindow.__codexObsidianLinkAssistantV1.setTooltip(missingTooltip.token, '');
+  assert.equal(missingButton.isConnected, false);
+  const requestCountAfterReject = requests.length;
+  observerCallback();
+  flushAnimationFrames();
+  assert.equal(requests.length, requestCountAfterReject);
   let prevented = false;
   let stopped = false;
   button.listeners.get('click')({
@@ -195,7 +232,7 @@ test('renderer decorates current Codex prompt-link file references and cleans re
   ]);
 
   vm.runInContext(source, context);
-  assert.equal(root.children.filter((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1')).length, 2);
+  assert.equal(root.children.filter((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1')).length, 5);
   const currentButtons = root.children.filter((item) => item.hasAttribute('data-codex-obsidian-link-assistant-v1'));
   const currentButton = currentButtons[0];
   const currentLegacyButton = currentButtons[1];

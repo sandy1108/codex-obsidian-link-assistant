@@ -2,9 +2,9 @@
 
 - 本工程是个人源码工具，不属于Codex官方插件或Codex-Dynamic-Skin上游仓库。
 - 使用Codex官方安装包内的已签名Node运行；不安装运行时npm依赖。
-- 只允许处理用户选定Obsidian Vault内现有Markdown文件链接。
+- 只为当前配置Vault内已存在的普通文件链接提供增强；worker必须校验真实路径、Vault边界和普通文件类型，并拒绝`.obsidian`、`.git`、`.trash`管理目录。
 - CDP只绑定回环地址；在校验Codex进程身份、真实监听地址及app://页面前不注入。
-- 不修改官方Codex.app、~/.codex配置、登录项、用户笔记、换肤或其他CDP工具状态。
+- 源码功能不通过修改官方Codex.app实现；本阶段仅按用户批准单独同步`~/.codex/AGENTS.md`中的Obsidian链接规则，不改其他Codex配置、登录项、用户笔记、换肤或其他CDP工具状态。
 - 所有打开请求均通过限制严格的Obsidian URI校验和固定`/usr/bin/open`参数数组；禁止shell执行。
 - 用户任务可能未保存时，不自动退出或强杀Codex。任何首次CDP启动先落盘步骤、目标、恢复和停止条件。
 - 核心逻辑、关键安全边界与易误用位置必须有中文注释。

@@ -19,11 +19,18 @@ export function isVaultMarkdownHref(href, vaultFileUrlPrefix) {
   }
 }
 
-export function buildRendererSource({ bindingName, vaultFileUrlPrefix }) {
+export function buildRendererSource({ bindingName, vaultFileUrlPrefix, vaultRoot: configuredVaultRoot }) {
   if (!/^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(bindingName)) {
     throw new TypeError('CDP binding名称不合法');
   }
-  const prefix = JSON.stringify(vaultFileUrlPrefix);
+  let vaultRoot = configuredVaultRoot;
+  if (typeof vaultRoot !== 'string' && typeof vaultFileUrlPrefix === 'string') {
+    try { vaultRoot = fileURLToPath(new URL(vaultFileUrlPrefix)); } catch { vaultRoot = null; }
+  }
+  if (typeof vaultRoot !== 'string' || !path.isAbsolute(vaultRoot)) {
+    throw new TypeError('Vault绝对路径不合法');
+  }
+  const root = JSON.stringify(vaultRoot.replace(/\/+$/u, ''));
   const binding = JSON.stringify(bindingName);
   return `(() => {
     // 仅在Codex主frame注入，子frame及非Codex页面不安装处理器。
@@ -34,10 +41,11 @@ export function buildRendererSource({ bindingName, vaultFileUrlPrefix }) {
     if (existing?.active) {
       try { existing.cleanup?.(); } catch {}
     }
-    const vaultPrefix = ${prefix};
+    const vaultRoot = ${root};
+    const vaultPathBoundary = vaultRoot.endsWith('/') ? vaultRoot : vaultRoot + '/';
     const binding = ${binding};
     // 当前Codex将本地文件引用渲染为带data-prompt-link-href的role=button节点；保留旧版anchor兼容。
-    const selector = '[data-local-conversation-final-assistant] [data-prompt-link-href], [data-local-conversation-final-assistant] a[href^="file:"]';
+    const selector = '[data-local-conversation-final-assistant] [data-prompt-link-href], [data-local-conversation-final-assistant] a[href^="file:"], [data-local-conversation-final-assistant] a[href^="/"]';
     const buttonAttribute = 'data-codex-obsidian-link-assistant-v1';
     const copyButtonAttribute = 'data-codex-obsidian-link-assistant-copy-v1';
     const actionAttribute = 'data-codex-obsidian-link-action-v1';
@@ -84,19 +92,25 @@ export function buildRendererSource({ bindingName, vaultFileUrlPrefix }) {
       '@media (prefers-reduced-motion: reduce) { ' + buttonSelector + ' { transition: none; } }',
     ].join('');
     (document.head ?? document.documentElement).insertBefore(stylesheet, null);
-    const eligible = (href) => {
+    const referencePath = (href) => {
       try {
+        if (typeof href !== 'string' || /[\\u0000-\\u001f\\u007f]/u.test(href)) return '';
+        if (href.startsWith('/')) return href;
         const url = new URL(href, location.href);
-        const root = new URL(vaultPrefix);
-        if (url.protocol !== 'file:' || url.host !== '' || url.search
-          || root.protocol !== 'file:' || root.host !== '') return false;
-        const notePath = decodeURIComponent(url.pathname);
-        const vaultPath = decodeURIComponent(root.pathname);
-        if (!notePath.startsWith(vaultPath) || !/\\.md$/i.test(notePath)) return false;
-        return !/[\\u0000-\\u001f\\u007f]/u.test(notePath);
+        if (url.protocol !== 'file:' || url.host !== '' || url.search) return '';
+        return decodeURIComponent(url.pathname);
       } catch {
-        return false;
+        return '';
       }
+    };
+    const eligible = (href) => {
+      const absolutePath = referencePath(href);
+      const isAbsolutePosixPath = absolutePath.startsWith('/');
+      if (!isAbsolutePosixPath || absolutePath === vaultRoot
+        || !absolutePath.startsWith(vaultPathBoundary)) return false;
+      const relativePath = absolutePath.slice(vaultPathBoundary.length);
+      if (!relativePath || relativePath.split('/').some((part) => ['.obsidian', '.git', '.trash'].includes(part))) return false;
+      return true;
     };
     const removeButton = (button) => {
       const record = buttons.get(button);
@@ -112,25 +126,45 @@ export function buildRendererSource({ bindingName, vaultFileUrlPrefix }) {
       if (typeof token !== 'string' || typeof uri !== 'string' || uri.length > 8192) return false;
       const tooltipSet = tooltipButtonSets.get(token);
       if (!tooltipSet) return false;
-      const title = uri === '' || uri.startsWith('obsidian://open?') ? uri : '';
+      const title = uri.startsWith('obsidian://open?') ? uri : '';
+      if (!title) {
+        const firstButton = [...tooltipSet][0];
+        const targetRecord = firstButton ? buttons.get(firstButton) : null;
+        const targetState = targetRecord ? tooltipByTarget.get(targetRecord.target) : null;
+        if (targetState?.token === token) targetState.status = 'rejected';
+        for (const button of [...tooltipSet]) removeButton(button);
+        tooltipButtonSets.delete(token);
+        return true;
+      }
+      const firstButton = [...tooltipSet][0];
+      const targetRecord = firstButton ? buttons.get(firstButton) : null;
+      const targetState = targetRecord ? tooltipByTarget.get(targetRecord.target) : null;
+      if (targetState?.token === token) targetState.status = 'accepted';
       for (const button of tooltipSet) {
-        if (button.isConnected) button.title = title;
+        if (button.isConnected) {
+          button.title = title;
+          button.hidden = false;
+          button.disabled = false;
+        }
       }
       return true;
     };
     const requestTooltip = (target, controls, href) => {
       const previous = tooltipByTarget.get(target);
+      if (previous?.href === href && previous.status === 'rejected') return;
       if (previous?.href === href && previous.controls.length === controls.length
         && previous.controls.every((button, index) => button === controls[index])) return;
       if (previous) tooltipButtonSets.delete(previous.token);
       const token = 'tooltip-' + (++nextTooltipId);
       const tooltipSet = new Set(controls);
       tooltipButtonSets.set(token, tooltipSet);
-      tooltipByTarget.set(target, { href, token, controls });
+      tooltipByTarget.set(target, { href, token, controls, status: 'pending' });
       for (const button of tooltipSet) {
         const record = buttons.get(button);
         if (record) record.tooltipToken = token;
         button.title = '';
+        button.hidden = true;
+        button.disabled = true;
       }
       try { window[binding](JSON.stringify({ action: 'tooltip', href, token })); } catch {}
     };
@@ -145,6 +179,8 @@ export function buildRendererSource({ bindingName, vaultFileUrlPrefix }) {
       for (const target of document.querySelectorAll(selector)) {
         const href = targetHref(target);
         if (!target.isConnected || !eligible(href)) continue;
+        const previous = tooltipByTarget.get(target);
+        if (previous?.href === href && previous.status === 'rejected') continue;
         const next = target.nextElementSibling;
         if (next?.getAttribute(actionAttribute) === 'open' && next.hasAttribute(buttonAttribute)) {
           let copyButton;
@@ -174,6 +210,9 @@ export function buildRendererSource({ bindingName, vaultFileUrlPrefix }) {
     const createActionButton = (target, action) => {
       const button = document.createElement('button');
       button.type = 'button';
+      // worker核实文件存在且位于Vault后，才显示按钮；未确认前保持不可见。
+      button.hidden = true;
+      button.disabled = true;
       button.textContent = action === 'open' ? '↗ 在 Obsidian 打开' : '⧉';
       button.title = '';
       button.setAttribute('aria-label', action === 'open' ? '在 Obsidian 中打开此笔记' : '复制 Obsidian URI');

@@ -13,11 +13,20 @@ test('parses supported worker actions and requires a confirmation token only for
   assert.deepEqual(parseWorkerRequest(request('refresh')), {
     v: 1, type: 'request', id: requestId, action: 'refresh',
   });
+  assert.deepEqual(parseWorkerRequest(request('launch')), {
+    v: 1, type: 'request', id: requestId, action: 'launch',
+  });
+  assert.deepEqual(parseWorkerRequest(request('connect')), {
+    v: 1, type: 'request', id: requestId, action: 'connect',
+  });
   assert.deepEqual(parseWorkerRequest(request('confirmRestart', { confirmationId })), {
     v: 1, type: 'request', id: requestId, action: 'confirmRestart', confirmationId,
   });
   assert.deepEqual(parseWorkerRequest(request('cancelConfirmation', { confirmationId })), {
     v: 1, type: 'request', id: requestId, action: 'cancelConfirmation', confirmationId,
+  });
+  assert.deepEqual(parseWorkerRequest(request('configureVault', { vaultRoot: '/Users/example/Notes' })), {
+    v: 1, type: 'request', id: requestId, action: 'configureVault', vaultRoot: '/Users/example/Notes',
   });
 });
 
@@ -25,10 +34,14 @@ test('rejects malformed, unsupported, and extra-field requests', () => {
   for (const line of [
     '{',
     '[]',
-    request('connect'),
+    request('enable'),
     JSON.stringify({ v: 2, type: 'request', id: requestId, action: 'refresh' }),
     JSON.stringify({ v: 1, type: 'command', id: requestId, action: 'refresh' }),
     request('refresh', { path: '/tmp/note.md' }),
+    request('configureVault'),
+    request('configureVault', { vaultRoot: 'relative/path' }),
+    request('configureVault', { vaultRoot: '/Users/example/Notes', extra: true }),
+    request('configureVault', { vaultRoot: `/Users/${'a'.repeat(17000)}` }),
     request('confirmRestart'),
     request('cancelConfirmation', { confirmationId, extra: true }),
     `${request('refresh')}\n{}`,
@@ -58,4 +71,18 @@ test('rejects unknown fields, unsupported messages, and malformed identifiers', 
   assert.throws(() => serializeWorkerMessage({ v: 1, type: 'accepted', id: requestId, uri: 'obsidian://open' }));
   assert.throws(() => serializeWorkerMessage({ v: 1, type: 'unknown', id: requestId }));
   assert.throws(() => serializeWorkerMessage({ v: 1, type: 'accepted', id: requestId.repeat(5000) }));
+});
+
+test('state messages expose only bounded Vault settings fields', () => {
+  const line = serializeWorkerMessage({
+    v: 1, type: 'state', seq: 1, codex: 'stopped', cdp: 'closed', worker: 'observing', pageCount: 0,
+    vaultConfigured: true, vaultRoot: '/Users/example/Notes', vaultName: 'Notes',
+    recommendedVaultRoot: null,
+  });
+  assert.deepEqual(JSON.parse(line).vaultRoot, '/Users/example/Notes');
+  assert.throws(() => serializeWorkerMessage({
+    v: 1, type: 'state', seq: 1, codex: 'stopped', cdp: 'closed', worker: 'observing', pageCount: 0,
+    vaultConfigured: true, vaultRoot: '/Users/example/Notes', vaultName: 'Notes',
+    recommendedVaultRoot: null, obsidianUri: 'obsidian://open',
+  }));
 });

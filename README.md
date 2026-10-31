@@ -1,15 +1,23 @@
 # Codex笔记链接助手
 
-本工具通过 Codex 桌面客户端提供的 Chrome DevTools Protocol（CDP），为回复中的本地 Markdown 笔记链接加入“在 Obsidian 打开”和紧凑复制按钮。正文只保留本地文件链接；Obsidian URI显示在按钮悬停提示中。它不修改 Codex 应用包，也不是官方 Codex 插件。
+本工具通过 Codex 桌面客户端提供的 Chrome DevTools Protocol（CDP），为回复中的本地文件链接加入“在 Obsidian 打开”和紧凑复制按钮。Codex桌面端使用绝对POSIX路径链接；Obsidian URI只显示在按钮悬停提示中。它不修改Codex应用包，也不是官方Codex插件。
 
 ## 功能与边界
 
-- 只处理已配置 Vault 内真实存在的 `.md` 文件；越界、失效、带查询参数或非 Markdown 目标均被拒绝。
+- 识别Codex原生绝对POSIX路径链接，并兼容历史 `file:` 链接；只处理当前配置Vault内真实存在的普通文件。worker以`realpath`和目录边界校验归属，拒绝缺失目标、目录、Vault外路径及`.obsidian`、`.git`、`.trash`管理目录。
+- Vault内的Markdown、Canvas、Base、图片、PDF和其他普通文件都可获得按钮；按钮只把经校验的Obsidian URI交给Obsidian，不保证每种格式都能预览。
 - 只在核验签名、进程身份、回环端口和 `app://` 页面后注入隔离世界脚本。
 - 打开按钮只通过固定 `/usr/bin/open` 参数打开经校验的 Obsidian URI；复制按钮只通过 `/usr/bin/pbcopy` 写剪贴板，不拼接或执行 shell 命令。
-- App启动后只读取本机状态；点击“连接并启用”后才执行连接、启动或注入动作。需要正常退出普通 Codex 时会请求确认；取消、身份变化或超时都不会强制结束进程。
+- App启动后只读取本机状态。操作分为两步：先点“启动 Codex（CDP模式）”或“重启 Codex 为 CDP 模式”把 Codex 带到可验证的调试入口，再点“连接 Codex CDP”注入笔记按钮；启动动作本身不注入。连接后若暂无聊天页，会显示“已连接 · 暂无聊天页”，打开对话后自动启用。需要正常退出普通 Codex 时会请求确认；取消、身份变化或超时都不会强制结束进程。
 - 暂停或退出只清理本工具的页面增强，不主动退出 Codex。恢复普通 Codex只针对由本助手启动且指纹仍匹配的单一实例，并再次确认；该操作会中断该实例上的其他CDP客户端。
 - App不设置登录项或开机自启，不捆绑Codex/Node运行时，不读聊天数据库或从标题猜笔记路径。
+
+## Vault配置
+
+- 菜单浮窗只支持一个Vault。首次使用时通过“选择文件夹…”选择已初始化且含`.obsidian`目录的Vault，再点击“保存并应用”；建议路径只用于预填，不会自动保存。
+- worker将版本号和规范化后的Vault路径原子保存至`~/Library/Application Support/CodexObsidianLinkAssistant/settings.json`。配置缺失或无效时不会猜测或自动创建Vault，需从浮窗重新选择。
+- 当前源码已包含绝对路径识别、单Vault配置、残留锁自动恢复、启动/连接分步操作和全链路错误日志。0.1.6（build 6）为换用新菜单栏图标的测试包，用户可自行安装和验收；构建脚本不会替换已安装助手。
+- 0.1.6之后的源码还包含：worker崩溃后可在浮窗内重启、Codex退出后界面自动降级为未连接、零页面警告、兼容性核验缓存、恢复普通Codex前先校验、仅带端口参数的外部CDP识别，以及Cmd+Q复用清理确认。这些改动尚未打包。
 
 ## 构建本机App与DMG
 
@@ -18,7 +26,7 @@
 在Finder中依次打开：
 
 1. `bin/build-menu-app.command`：构建 `dist/Codex笔记链接助手.app`。
-2. `bin/build-dmg.command`：生成 `dist/Codex笔记链接助手-0.1.1-arm64.dmg`。
+2. `bin/build-dmg.command`：生成 `dist/Codex笔记链接助手-0.1.6-arm64.dmg`。
 
 脚本拒绝覆盖已有产物。DMG只包含App、“应用程序”快捷方式和安装/恢复说明；构建不会安装App、替换现有桌面入口或设置登录项。
 

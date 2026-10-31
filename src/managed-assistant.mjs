@@ -4,6 +4,8 @@ const FIXED_ERROR_CODES = new Set([
   'PROCESS_IDENTITY_UNAVAILABLE', 'CONFIRMATION_EXPIRED', 'NO_PENDING_CONFIRMATION',
   'INVALID_CONFIRMATION', 'EXTERNAL_PROCESS', 'COMPATIBILITY_MISSING', 'INJECTION_FAILED',
   'WORKER_STOPPING', 'STATE_UNAVAILABLE', 'RUNTIME_ERROR', 'PROCESS_EXIT_TIMEOUT', 'CODEX_LAUNCH_FAILED',
+  'VAULT_NOT_CONFIGURED', 'VAULT_SETTINGS_INVALID', 'VAULT_DIRECTORY_INVALID',
+  'VAULT_SETTINGS_WRITE_FAILED', 'VAULT_APPLY_FAILED',
 ]);
 const CONFIRMATION_TTL_MS = 60_000;
 const CONFIRMATION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,128}$/u;
@@ -18,6 +20,15 @@ function fixedErrorCode(error) {
   return FIXED_ERROR_CODES.has(error?.code) ? error.code : 'RUNTIME_ERROR';
 }
 
+/** 把runtime的只读模式映射为固定的UI错误码，避免把模式名带出协议。 */
+function modeError(mode) {
+  if (mode === 'ambiguous') return assistantError('PROCESS_AMBIGUOUS');
+  if (mode === 'incompatible') return assistantError('VERSION_UNSUPPORTED');
+  if (mode === 'untrusted-cdp') return assistantError('CDP_UNTRUSTED');
+  if (mode === 'identity-unknown') return assistantError('PROCESS_IDENTITY_UNAVAILABLE');
+  return assistantError('STATE_UNAVAILABLE');
+}
+
 function normalizedState(source = {}) {
   const stringOrNull = (value) => typeof value === 'string' ? value : null;
   return {
@@ -30,6 +41,10 @@ function normalizedState(source = {}) {
     port: Number.isInteger(source.port) && source.port >= 1024 && source.port <= 65535 ? source.port : null,
     launchSource: ['none', 'app', 'external', 'unknown'].includes(source.launchSource)
       ? source.launchSource : 'unknown',
+    vaultConfigured: source.vaultConfigured === true,
+    vaultRoot: stringOrNull(source.vaultRoot),
+    vaultName: stringOrNull(source.vaultName),
+    recommendedVaultRoot: stringOrNull(source.recommendedVaultRoot),
     errorCode: FIXED_ERROR_CODES.has(source.errorCode) ? source.errorCode : null,
   };
 }
@@ -135,7 +150,7 @@ export function createManagedAssistant({ runtime, clock = Date.now, tokenFactory
     }
   }
 
-  async function enableImpl(request) {
+  async function launchImpl(request) {
     if (shutdownComplete) throw assistantError('WORKER_STOPPING');
     try {
       const inspected = await inspect();
@@ -147,16 +162,50 @@ export function createManagedAssistant({ runtime, clock = Date.now, tokenFactory
         await publishState();
         return result;
       }
-      if (!['not-running', 'cdp-ready'].includes(inspected.mode)) {
-        throw assistantError(inspected.mode === 'ambiguous' ? 'PROCESS_AMBIGUOUS'
-          : inspected.mode === 'incompatible' ? 'VERSION_UNSUPPORTED' : 'STATE_UNAVAILABLE');
+      if (inspected.mode === 'cdp-ready') {
+        // 已由任意方式带CDP启动时不重启，也不改变已有的连接/暂停状态。
+        if (workerState === 'error') workerState = 'observing';
+        await publishState();
+        return { ok: true, code: 'already-launched' };
       }
-      const result = await runtime.enable({ expectedFingerprint: inspected.processFingerprint ?? null });
+      if (inspected.mode !== 'not-running') throw modeError(inspected.mode);
+      const result = await runtime.launch({ expectedFingerprint: inspected.processFingerprint ?? null });
+      applyRuntimeResult(result);
+      workerState = 'observing';
+      await publishState();
+      return { ok: true, code: 'launched' };
+    } catch (error) { return fail(error); }
+  }
+
+  async function connectImpl() {
+    if (shutdownComplete) throw assistantError('WORKER_STOPPING');
+    try {
+      const inspected = await inspect();
+      applyRuntimeResult(inspected);
+      if (current.errorCode) throw assistantError(current.errorCode);
+      if (inspected.mode !== 'cdp-ready') throw modeError(inspected.mode);
+      const result = await runtime.connect();
       applyRuntimeResult(result);
       workerState = 'active';
       await publishState();
-      return { ok: true, code: 'enabled' };
+      // 仍保持active以便后续页面自动附着，但零页面要作为警告告知界面。
+      return { ok: true, code: current.pageCount > 0 ? 'connected' : 'connected-no-pages' };
     } catch (error) { return fail(error); }
+  }
+
+  /** Codex退出或supervisor异常结束时，把残留的active/paused状态降级为真实观察态。 */
+  async function supervisorExitedImpl() {
+    if (shutdownComplete) return { ok: true, code: 'supervisor-exited' };
+    try {
+      const inspected = await runtime.inspect();
+      applyRuntimeResult(inspected);
+      workerState = current.errorCode ? 'error' : 'observing';
+    } catch (error) {
+      current.errorCode = fixedErrorCode(error);
+      workerState = 'error';
+    }
+    await publishState();
+    return { ok: true, code: 'supervisor-exited' };
   }
 
   async function restoreOrdinaryImpl(request) {
@@ -190,7 +239,8 @@ export function createManagedAssistant({ runtime, clock = Date.now, tokenFactory
       if (pending.reason === 'restartOrdinaryCodex') {
         if (inspected.mode !== 'ordinary-running') throw assistantError('PROCESS_CHANGED');
         result = await runtime.confirmRestart({ targetFingerprint: pending.targetFingerprint });
-        workerState = 'active';
+        // 重启只负责以CDP模式启动Codex；注入由单独的connect动作完成。
+        workerState = 'observing';
       } else {
         if (inspected.mode !== 'cdp-ready' || inspected.restoreAllowed !== true) {
           throw assistantError('PROCESS_CHANGED');
@@ -200,7 +250,7 @@ export function createManagedAssistant({ runtime, clock = Date.now, tokenFactory
       }
       applyRuntimeResult(result);
       await publishState();
-      return { ok: true, code: pending.reason === 'restartOrdinaryCodex' ? 'enabled' : 'ordinary-restored' };
+      return { ok: true, code: pending.reason === 'restartOrdinaryCodex' ? 'launched' : 'ordinary-restored' };
     } catch (error) { return fail(error); }
   }
 
@@ -248,6 +298,35 @@ export function createManagedAssistant({ runtime, clock = Date.now, tokenFactory
     } catch (error) { return fail(error); }
   }
 
+  async function configureVaultImpl(request) {
+    if (shutdownComplete) throw assistantError('WORKER_STOPPING');
+    const previousError = current.errorCode;
+    const wasActive = workerState === 'active';
+    try {
+      if (typeof runtime.configureVault !== 'function') throw assistantError('STATE_UNAVAILABLE');
+      const result = await runtime.configureVault({ vaultRoot: request.vaultRoot, wasActive });
+      applyRuntimeResult(result);
+      if (wasActive && current.cdp !== 'verified') workerState = 'error';
+      if (workerState === 'error' && current.vaultConfigured
+        && ['VAULT_NOT_CONFIGURED', 'VAULT_SETTINGS_INVALID', 'VAULT_DIRECTORY_INVALID'].includes(previousError)) {
+        workerState = 'observing';
+      }
+      await publishState();
+      return { ok: true, code: 'vault-configured' };
+    } catch (error) {
+      const code = fixedErrorCode(error);
+      if (code === 'VAULT_APPLY_FAILED') workerState = 'error';
+      try {
+        const inspected = await runtime.inspect();
+        applyRuntimeResult(inspected);
+      } catch {
+        current.errorCode = code;
+      }
+      await publishState();
+      return { ok: false, code: code.toLowerCase().replaceAll('_', '-') };
+    }
+  }
+
   async function shutdownImpl() {
     if (shutdownComplete) return { ok: true, code: 'shutdown' };
     shutdownComplete = true;
@@ -278,12 +357,15 @@ export function createManagedAssistant({ runtime, clock = Date.now, tokenFactory
       return this[action]?.(request) ?? Promise.reject(assistantError('INVALID_REQUEST'));
     },
     refresh: (request) => enqueue(refreshImpl, request),
-    enable: (request) => enqueue(enableImpl, request),
+    supervisorExited: () => enqueue(supervisorExitedImpl),
+    launch: (request) => enqueue(launchImpl, request),
+    connect: (request) => enqueue(connectImpl, request),
     confirmRestart: (request) => enqueue(confirmRestartImpl, request),
     cancelConfirmation: (request) => enqueue(cancelConfirmationImpl, request),
     pause: (request) => enqueue(pauseImpl, request),
     resume: (request) => enqueue(resumeImpl, request),
     restoreOrdinary: (request) => enqueue(restoreOrdinaryImpl, request),
+    configureVault: (request) => enqueue(configureVaultImpl, request),
     shutdown: (request) => enqueue(shutdownImpl, request),
   };
 }

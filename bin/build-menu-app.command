@@ -6,7 +6,8 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 USER_HOME="$(/usr/bin/printenv HOME)"
 PRODUCT_NAME="Codex笔记链接助手"
 BUNDLE_IDENTIFIER="local.codex-obsidian-link-assistant"
-PRODUCT_VERSION="0.1.1"
+PRODUCT_VERSION="0.1.6"
+PRODUCT_BUILD="6"
 DIST_DIR="$REPO_ROOT/dist"
 APP_OUTPUT="$DIST_DIR/$PRODUCT_NAME.app"
 RESOURCE_DIR="$REPO_ROOT/macOSApp/Resources"
@@ -36,7 +37,7 @@ done
 ICON_SOURCE_HASH="$(/usr/bin/shasum -a 256 "$APPICON_SOURCE" | /usr/bin/awk '{print $1}')"
 MENU_TEMPLATE_HASH="$(/usr/bin/shasum -a 256 "$MENU_TEMPLATE" | /usr/bin/awk '{print $1}')"
 [[ "$ICON_SOURCE_HASH" == "a4bb5a111870d46255e2ad78fc97783bcc6dc79086ca8bf0a4fa0da8a35b9d3d" ]] || fail "AppIcon源图哈希不匹配。"
-[[ "$MENU_TEMPLATE_HASH" == "d802bebf38c1a6572d16271caccb8ee720fd6900d0188be280a9d1afa8e10eca" ]] || fail "菜单栏模板图哈希不匹配。"
+[[ "$MENU_TEMPLATE_HASH" == "f15a443520b43b867a24ecef452deed9f536e672ac7552f7bf8b3e67e328ceaf" ]] || fail "菜单栏模板图哈希不匹配。"
 [[ "$(/usr/bin/sips -g hasAlpha "$MENU_TEMPLATE" | /usr/bin/awk '/hasAlpha:/ {print $2}')" == "yes" ]] || fail "菜单栏模板图缺少alpha通道。"
 
 typeset -a ICON_FILES
@@ -153,7 +154,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>CFBundleName</key><string>$PRODUCT_NAME</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$PRODUCT_VERSION</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleVersion</key><string>$PRODUCT_BUILD</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><false/>

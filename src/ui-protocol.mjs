@@ -2,8 +2,8 @@ export const MAX_JSON_LINE_BYTES = 16 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const CONFIRMATION_ID_PATTERN = /^[A-Za-z0-9_-]{32,128}$/u;
 const ACTIONS = new Set([
-  'refresh', 'enable', 'confirmRestart', 'cancelConfirmation',
-  'pause', 'resume', 'restoreOrdinary', 'shutdown',
+  'refresh', 'launch', 'connect', 'confirmRestart', 'cancelConfirmation',
+  'pause', 'resume', 'restoreOrdinary', 'shutdown', 'configureVault',
 ]);
 const CONFIRMATION_ACTIONS = new Set(['confirmRestart', 'cancelConfirmation']);
 
@@ -48,11 +48,17 @@ export function parseWorkerRequest(line) {
   }
 
   const confirmationAction = CONFIRMATION_ACTIONS.has(request.action);
+  const configureVaultAction = request.action === 'configureVault';
   const expectedKeys = confirmationAction
     ? ['v', 'type', 'id', 'action', 'confirmationId']
-    : ['v', 'type', 'id', 'action'];
+    : configureVaultAction
+      ? ['v', 'type', 'id', 'action', 'vaultRoot']
+      : ['v', 'type', 'id', 'action'];
   if (!exactKeys(request, expectedKeys)
-    || (confirmationAction && !hasValidConfirmationId(request.confirmationId))) {
+    || (confirmationAction && !hasValidConfirmationId(request.confirmationId))
+    || (configureVaultAction && (typeof request.vaultRoot !== 'string'
+      || request.vaultRoot.length > 8192 || !request.vaultRoot.startsWith('/')
+      || /[\u0000-\u001f\u007f]/u.test(request.vaultRoot)))) {
     throw protocolError('INVALID_REQUEST');
   }
   return request;
@@ -75,7 +81,10 @@ function validWorkerMessage(message) {
         && message.expiresInSeconds > 0 && message.expiresInSeconds <= 60;
     case 'state': {
       const required = ['v', 'type', 'seq', 'codex', 'cdp', 'worker', 'pageCount'];
-      const optional = ['codexVersion', 'codexBuild', 'port', 'launchSource', 'errorCode'];
+      const optional = [
+        'codexVersion', 'codexBuild', 'port', 'launchSource', 'errorCode',
+        'vaultConfigured', 'vaultRoot', 'vaultName', 'recommendedVaultRoot',
+      ];
       return exactKeys(message, required, optional)
         && Number.isSafeInteger(message.seq) && message.seq >= 0
         && ['stopped', 'running', 'unknown'].includes(message.codex)
@@ -89,6 +98,16 @@ function validWorkerMessage(message) {
         && (message.port === undefined || message.port === null
           || (Number.isInteger(message.port) && message.port >= 1024 && message.port <= 65535))
         && (message.launchSource === undefined || ['none', 'app', 'external', 'unknown'].includes(message.launchSource))
+        && (message.vaultConfigured === undefined || typeof message.vaultConfigured === 'boolean')
+        && (message.vaultRoot === undefined || message.vaultRoot === null
+          || (typeof message.vaultRoot === 'string' && message.vaultRoot.startsWith('/')
+            && message.vaultRoot.length <= 8192 && !/[\u0000-\u001f\u007f]/u.test(message.vaultRoot)))
+        && (message.vaultName === undefined || message.vaultName === null
+          || (typeof message.vaultName === 'string' && message.vaultName.length <= 255))
+        && (message.recommendedVaultRoot === undefined || message.recommendedVaultRoot === null
+          || (typeof message.recommendedVaultRoot === 'string'
+            && message.recommendedVaultRoot.startsWith('/') && message.recommendedVaultRoot.length <= 8192
+            && !/[\u0000-\u001f\u007f]/u.test(message.recommendedVaultRoot)))
         && (message.errorCode === undefined || message.errorCode === null
           || (typeof message.errorCode === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(message.errorCode)));
     }

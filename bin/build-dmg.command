@@ -6,7 +6,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PRODUCT_NAME="Codex笔记链接助手"
 DIST_DIR="$REPO_ROOT/dist"
 APP_BUNDLE="$DIST_DIR/$PRODUCT_NAME.app"
-DMG_OUTPUT="$DIST_DIR/$PRODUCT_NAME-0.1.1-arm64.dmg"
+DMG_OUTPUT="$DIST_DIR/$PRODUCT_NAME-0.1.6-arm64.dmg"
 WORK_DIR=""
 MOUNT_POINT=""
 MOUNTED=0
@@ -59,9 +59,10 @@ Codex笔记链接助手 · 安装与恢复
 3. 不要关闭Gatekeeper/SIP，不要清除隔离属性。如果系统没有提供单应用打开选项，请停止并联系维护者。
 
 使用
-- 启动后先显示本机状态；只有点击“连接并启用”才会请求连接/启动Codex并启用链接增强。
+- 启动后先显示本机状态。操作分两步：先点“启动Codex（CDP模式）”或“重启Codex为CDP模式”，再点“连接Codex CDP”启用链接增强；启动本身不注入。
+- 连接后若显示“已连接·暂无聊天页”，表示调试入口已连上但当前没有可注入页面，打开一个对话后会自动启用。
 - 如果需要正常退出正在运行的普通Codex，助手会先显示确认；请先保存未完成任务。取消不会退出Codex。
-- “暂停增强”会移除本工具注入的按钮；“退出”会先请求清理，Codex继续运行。
+- “暂停增强”会移除本工具注入的按钮；“退出”或Cmd+Q会先请求清理，Codex继续运行。
 - “恢复普通Codex”只处理本助手启动且身份仍可验证的Codex，并再次要求确认；身份不明或超时会停止，不会强杀。
 
 恢复与卸载
