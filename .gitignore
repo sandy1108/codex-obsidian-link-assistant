@@ -1,0 +1,32 @@
+# macOS 元数据
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 构建与依赖产物
+dist/
+**/.build/
+**/.swiftpm/
+DerivedData/
+node_modules/
+*.app
+*.dmg
+
+# 本地任务记录、日志、临时文件与备份归档
+.superpowers/
+*.log
+*.tmp
+*.swp
+*.swo
+*.bak
+*.backup
+*.orig
+*.rej
+*.tar
+*.tar.gz
+*.zip
+
+# 本机环境文件；示例配置仍可提交
+.env
+.env.*
+!.env.example

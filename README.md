@@ -1,0 +1,45 @@
+# Codex笔记链接助手
+
+本工具通过 Codex 桌面客户端提供的 Chrome DevTools Protocol（CDP），为回复中的本地 Markdown 笔记链接加入“在 Obsidian 打开”和紧凑复制按钮。正文只保留本地文件链接；Obsidian URI显示在按钮悬停提示中。它不修改 Codex 应用包，也不是官方 Codex 插件。
+
+## 功能与边界
+
+- 只处理已配置 Vault 内真实存在的 `.md` 文件；越界、失效、带查询参数或非 Markdown 目标均被拒绝。
+- 只在核验签名、进程身份、回环端口和 `app://` 页面后注入隔离世界脚本。
+- 打开按钮只通过固定 `/usr/bin/open` 参数打开经校验的 Obsidian URI；复制按钮只通过 `/usr/bin/pbcopy` 写剪贴板，不拼接或执行 shell 命令。
+- App启动后只读取本机状态；点击“连接并启用”后才执行连接、启动或注入动作。需要正常退出普通 Codex 时会请求确认；取消、身份变化或超时都不会强制结束进程。
+- 暂停或退出只清理本工具的页面增强，不主动退出 Codex。恢复普通 Codex只针对由本助手启动且指纹仍匹配的单一实例，并再次确认；该操作会中断该实例上的其他CDP客户端。
+- App不设置登录项或开机自启，不捆绑Codex/Node运行时，不读聊天数据库或从标题猜笔记路径。
+
+## 构建本机App与DMG
+
+首版只针对Apple Silicon自用，需本机Xcode/Swift、`/Applications/Codex.app`或`~/Applications/Codex.app`及其签名Node。构建脚本先核对Codex Bundle ID、Team ID、版本、build、`app.asar` SHA-256和Node主版本；任一值不匹配即停止。
+
+在Finder中依次打开：
+
+1. `bin/build-menu-app.command`：构建 `dist/Codex笔记链接助手.app`。
+2. `bin/build-dmg.command`：生成 `dist/Codex笔记链接助手-0.1.1-arm64.dmg`。
+
+脚本拒绝覆盖已有产物。DMG只包含App、“应用程序”快捷方式和安装/恢复说明；构建不会安装App、替换现有桌面入口或设置登录项。
+
+App采用ad-hoc代码签名并启用Hardened Runtime；DMG不签名、不公证。首次打开可能出现macOS对单个App的确认。只在核对来源并信任本机生成的构建时，按Finder或“系统设置 → 隐私与安全性”显示的单应用流程操作。不要关闭Gatekeeper/SIP或清除隔离属性；系统未提供单应用选项时停止。构建与签名核验命令见 `bin/build-menu-app.command`，恢复说明见 [RECOVER.md](RECOVER.md)。
+
+## 开发检查
+
+```sh
+"/Applications/Codex.app/Contents/Resources/cua_node/bin/node" --test
+swift test --package-path macOSApp
+swift build -c release --package-path macOSApp
+```
+
+当前兼容性清单位于 `macOSApp/Resources/compatibility.json`。Codex升级后如版本、build或ASAR哈希变化，App会停止注入；维护者需重新检查页面结构与安全边界后，才可修改清单。
+
+## 日志、恢复与卸载
+
+- 日志：`~/Library/Application Support/CodexObsidianLinkAssistant/assistant.log`；不记录聊天正文、笔记路径或Obsidian URI。
+- 退出前清理未获确认时，面板保持打开并显示状态待核验；不要强杀worker或删除锁文件来掩盖状态。
+- App无法启动时，可从 `/Applications/Codex.app` 手动打开普通Codex；本工具没有修改官方应用或用户数据。
+- 卸载时先从助手菜单退出，再由用户手动移除`/Applications/Codex笔记链接助手.app`。日志和源码保留，不自动删除用户级数据。
+- 旧源码CLI入口仍保留供维护；构建菜单栏App不会安装或替换它。
+
+项目过程、兼容基线、阶段日志和恢复证据保存在Obsidian知识库的“Notes/编码/项目/Codex笔记链接补丁”目录中。
