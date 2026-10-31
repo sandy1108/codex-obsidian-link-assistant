@@ -166,6 +166,59 @@ final class WorkerClientTests: XCTestCase {
         XCTAssertFalse(unrecoverable.canRefresh)
     }
 
+    func testFileLogWriterRotatesAndRestrictsPermissions() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("file-log-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = FileLogWriter(directory: directory, fileName: "assistant.log", maxBytes: 15)
+        writer.append("1234567890\n")
+        writer.append("abcdefghij\n")
+        writer.append("ABCDEFGHIJ\n")
+
+        XCTAssertEqual(try String(contentsOf: writer.fileURL, encoding: .utf8), "ABCDEFGHIJ\n")
+        XCTAssertEqual(try String(contentsOf: writer.backupURL, encoding: .utf8), "abcdefghij\n")
+        let fileAttributes = try FileManager.default.attributesOfItem(atPath: writer.fileURL.path)
+        XCTAssertEqual((fileAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let directoryAttributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        XCTAssertEqual((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+    }
+
+    func testWorkerStderrBudgetStopsLoggingAfterLimit() {
+        let budget = WorkerStderrBudget(limit: 5)
+        XCTAssertEqual(budget.consume(Data([1, 2, 3, 4])), Data([1, 2, 3, 4]))
+        XCTAssertEqual(budget.consume(Data([5, 6, 7])), Data([5]))
+        XCTAssertNil(budget.consume(Data([8])))
+
+        let zero = WorkerStderrBudget(limit: 0)
+        XCTAssertNil(zero.consume(Data([1])))
+    }
+
+    func testVersionDisplayFallsBackSafely() {
+        XCTAssertEqual(AppVersionInfo.display(shortVersion: "0.1.6", build: "6"), "v0.1.6 (6)")
+        XCTAssertEqual(AppVersionInfo.display(shortVersion: "0.1.6", build: " "), "v0.1.6")
+        XCTAssertEqual(AppVersionInfo.display(shortVersion: nil, build: "6"), "版本未知")
+        XCTAssertEqual(AppVersionInfo.display(shortVersion: "", build: "6"), "版本未知")
+    }
+
+    func testConfirmationCountdownExpiresAndFormatsMessage() {
+        let start = Date(timeIntervalSince1970: 1000)
+        let countdown = ConfirmationCountdown(seconds: 5, startedAt: start)
+        XCTAssertEqual(countdown.secondsRemaining(now: start), 5)
+        XCTAssertEqual(countdown.secondsRemaining(now: start.addingTimeInterval(0.2)), 5)
+        XCTAssertEqual(countdown.secondsRemaining(now: start.addingTimeInterval(4.2)), 1)
+        XCTAssertEqual(countdown.secondsRemaining(now: start.addingTimeInterval(5)), 0)
+        XCTAssertEqual(countdown.secondsRemaining(now: start.addingTimeInterval(6)), 0)
+        XCTAssertTrue(countdown.isExpired(now: start.addingTimeInterval(5)))
+        XCTAssertFalse(countdown.isExpired(now: start.addingTimeInterval(4.9)))
+
+        XCTAssertEqual(
+            ConfirmationMessage.text(base: "base", secondsRemaining: 3),
+            "base\n\n确认剩余 3 秒。"
+        )
+        XCTAssertTrue(ConfirmationMessage.text(base: "base", secondsRemaining: 0).contains("已过期"))
+        XCTAssertEqual(ConfirmationMessage.text(base: "base", secondsRemaining: nil), "base")
+    }
+
     func testActionAvailabilityFailsClosedForUnknownOrExternalState() throws {
         let unknown = WorkerActionAvailability(state: nil)
         XCTAssertFalse(unknown.canLaunch)

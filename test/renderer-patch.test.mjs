@@ -47,6 +47,8 @@ test('renderer is idempotent and removes observer, buttons, and listeners during
   assert.match(source, /window\.removeEventListener\('pagehide'/u);
   assert.match(source, /record\.target\.isConnected/u);
   assert.match(source, /data-prompt-link-href/u);
+  assert.match(source, /decorateInterval = 120/u);
+  assert.match(source, /clearTimeout/u);
 });
 
 test('renderer decorates current Codex prompt-link file references and cleans removed DOM nodes', () => {
@@ -131,6 +133,14 @@ test('renderer decorates current Codex prompt-link file references and cleans re
     animationFrames.clear();
     for (const callback of callbacks) callback();
   };
+  const timers = new Map();
+  let nextTimer = 1;
+  let now = 0;
+  const flushTimers = () => {
+    const callbacks = [...timers.values()];
+    timers.clear();
+    for (const callback of callbacks) callback();
+  };
   const pageWindow = {
     top: null,
     addEventListener() {},
@@ -148,6 +158,13 @@ test('renderer decorates current Codex prompt-link file references and cleans re
     MutationObserver,
     Map,
     JSON,
+    Date: { now: () => now },
+    setTimeout: (callback) => {
+      const id = nextTimer++;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeout: (id) => timers.delete(id),
     requestAnimationFrame: (callback) => {
       const id = nextFrame++;
       animationFrames.set(id, callback);
@@ -212,6 +229,11 @@ test('renderer decorates current Codex prompt-link file references and cleans re
   assert.equal(missingButton.isConnected, false);
   const requestCountAfterReject = requests.length;
   observerCallback();
+  assert.equal(timers.size, 1);
+  flushAnimationFrames();
+  assert.equal(requests.length, requestCountAfterReject);
+  now += 200;
+  flushTimers();
   flushAnimationFrames();
   assert.equal(requests.length, requestCountAfterReject);
   let prevented = false;
@@ -238,10 +260,29 @@ test('renderer decorates current Codex prompt-link file references and cleans re
   const currentLegacyButton = currentButtons[1];
   valid.remove();
   observerCallback();
+  // 节流期间只登记定时器，不立即插入动画帧；到期后才执行移除扫描。
+  assert.equal(timers.size, 1);
+  flushAnimationFrames();
+  assert.equal(currentButton.isConnected, true);
+  now += 200;
+  flushTimers();
   flushAnimationFrames();
   assert.equal(currentButton.isConnected, false);
   assert.equal(currentButton.listeners.has('click'), false);
   assert.equal(currentLegacyButton.isConnected, true);
+
+  const late = new Element('span', '', {
+    role: 'button', 'data-prompt-link-href': `${prefix}迟到/笔记.md`,
+  });
+  root.insertBefore(late, null);
+  targets.push(late);
+  observerCallback();
+  flushAnimationFrames();
+  assert.equal(late.nextElementSibling, null);
+  now += 200;
+  flushTimers();
+  flushAnimationFrames();
+  assert.ok(late.nextElementSibling?.hasAttribute('data-codex-obsidian-link-assistant-v1'));
 
   pageWindow.__codexObsidianLinkAssistantV1.cleanup();
   assert.equal(observerDisconnected, true);

@@ -34,9 +34,11 @@ struct ContentView: View {
             switch model.activeDialog {
             case .restartCodex:
                 Button("正常退出并以 CDP 启动", role: .destructive) { model.confirmPendingOperation() }
+                    .disabled(model.isConfirmationExpired)
                 Button("取消", role: .cancel) { model.cancelPendingOperation() }
             case .restoreOrdinaryCodex:
                 Button("恢复普通 Codex", role: .destructive) { model.confirmPendingOperation() }
+                    .disabled(model.isConfirmationExpired)
                 Button("取消", role: .cancel) { model.cancelPendingOperation() }
             case .exitAssistant:
                 Button("退出助手", role: .destructive) { model.exitAssistant() }
@@ -226,6 +228,10 @@ struct ContentView: View {
         HStack {
             Button("查看日志") { model.openLog() }
                 .buttonStyle(.borderless)
+            Text(AppVersionInfo.current)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .help("Codex 笔记链接助手版本")
             Spacer()
             if model.isWaitingToExit {
                 ProgressView()

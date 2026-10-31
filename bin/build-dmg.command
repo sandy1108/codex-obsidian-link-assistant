@@ -6,7 +6,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PRODUCT_NAME="Codex笔记链接助手"
 DIST_DIR="$REPO_ROOT/dist"
 APP_BUNDLE="$DIST_DIR/$PRODUCT_NAME.app"
-DMG_OUTPUT="$DIST_DIR/$PRODUCT_NAME-0.1.6-arm64.dmg"
+DMG_OUTPUT="$DIST_DIR/$PRODUCT_NAME-0.1.7-arm64.dmg"
 WORK_DIR=""
 MOUNT_POINT=""
 MOUNTED=0
@@ -52,6 +52,7 @@ mkdir -p "$STAGING" "$MOUNT_POINT"
 
 cat > "$STAGING/安装与恢复说明.txt" <<'NOTES'
 Codex笔记链接助手 · 安装与恢复
+版本：0.1.7（build 7），Apple Silicon测试包。
 
 安装
 1. 将“Codex笔记链接助手.app”拖到右侧“应用程序”快捷方式。
@@ -64,6 +65,7 @@ Codex笔记链接助手 · 安装与恢复
 - 如果需要正常退出正在运行的普通Codex，助手会先显示确认；请先保存未完成任务。取消不会退出Codex。
 - “暂停增强”会移除本工具注入的按钮；“退出”或Cmd+Q会先请求清理，Codex继续运行。
 - “恢复普通Codex”只处理本助手启动且身份仍可验证的Codex，并再次要求确认；身份不明或超时会停止，不会强杀。
+- 本版包含worker异常退出后恢复、确认倒计时、进程指纹持久化及日志轮转。若恢复按钮不可用，先查看状态与日志，不手工修改指纹文件。
 
 恢复与卸载
 - 助手无法启动时，可从“应用程序”打开标准Codex.app。此工具不会修改Codex.app或Codex用户数据。

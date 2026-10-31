@@ -32,11 +32,16 @@ test('maps an existing Chinese Markdown file URI to an encoded Obsidian URI', as
   });
 });
 
-test('preserves a fragment as a note heading', async () => {
+test('preserves a fragment as an encoded note heading', async () => {
   await withVault(async ({ vaultRoot, notePath }) => {
     const href = `${pathToFileURL(notePath).href}#Heading%20one`;
     const result = await resolveVaultFileHref(href, { vaultRoot, vaultName });
-    assert.match(result, /file=.*%23Heading\+one$/);
+    const url = new URL(result);
+    assert.equal(url.protocol, 'obsidian:');
+    assert.equal(url.searchParams.get('vault'), vaultName);
+    assert.equal(url.searchParams.get('file'), 'Notes/开发 计划.md#Heading one');
+    // #必须保留为%23；裸#会被Obsidian当作URI片段，标题无法传给笔记。
+    assert.match(result, /%23Heading\+one$/u);
   });
 });
 

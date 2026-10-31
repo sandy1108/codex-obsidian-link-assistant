@@ -3,6 +3,7 @@
 ## App无法启动
 
 1. 从`~/Library/Application Support/CodexObsidianLinkAssistant/assistant.log`查看错误时间和固定错误码；日志不应出现聊天正文、笔记路径或URI。
+   P2源码版还把worker标准错误写入同目录的`worker-stderr.log`；日志满约1 MiB后轮转为`.1`。分享错误日志前检查是否含敏感内容。
 2. 若macOS因本机自用App未公证而阻止首次打开，只按系统提供的单应用提示操作；不关闭Gatekeeper/SIP、不清除隔离属性。系统没有提供单应用选项时停止。
 3. 如果助手不可用，从`/Applications/Codex.app`手动打开普通Codex。构建和运行助手不会修改Codex应用包、Codex用户数据或登录项。
 4. 如果用户点击“启动Codex（CDP模式）”或“重启Codex为CDP模式”后Codex仍是普通模式，取消确认会保持现状；启动只负责打开调试入口，注入需再点“连接Codex CDP”。身份不清、多实例、签名或兼容性不符时不注入。
@@ -32,6 +33,7 @@
 ## 恢复普通Codex
 
 - 使用助手面板里的“恢复普通Codex”并完成二次确认。仅限由助手启动且进程指纹仍匹配的唯一Codex实例。
+- P2源码版会把助手启动的进程指纹保存在应用支持目录的`launch-ownership.json`中，供助手重启后核验；缺失、损坏、进程变化或CDP端点不可信时按非本助手进程处理，不能恢复。不要手工编辑该文件来绕过身份确认。
 - 该操作会正常退出该Codex实例并以普通方式重开，因此其他CDP客户端也会断开。身份变化、多实例或超时则停止，不强制结束进程。
 - 若助手不能工作，由用户先从Codex自己的菜单正常退出，再从`/Applications/Codex.app`打开普通实例。不要清除隔离属性、改写代码签名或关闭系统安全功能。
 

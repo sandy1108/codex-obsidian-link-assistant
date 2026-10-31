@@ -57,6 +57,7 @@ final class WorkerClient: ObservableObject {
     private var process: Process?
     private var inputPipe: Pipe?
     private var outputPipe: Pipe?
+    private var stderrPipe: Pipe?
     private var outputBuffer = Data()
     private var outputConsumerTask: Task<Void, Never>?
     private var outputStreamFinished = false
@@ -97,12 +98,13 @@ final class WorkerClient: ObservableObject {
             let child = Process()
             let stdin = Pipe()
             let stdout = Pipe()
+            let stderr = Pipe()
 
             child.executableURL = paths.node
             child.arguments = [paths.worker.path]
             child.standardInput = stdin
             child.standardOutput = stdout
-            child.standardError = FileHandle.nullDevice
+            child.standardError = stderr
             child.environment = [
                 "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -114,6 +116,7 @@ final class WorkerClient: ObservableObject {
             process = child
             inputPipe = stdin
             outputPipe = stdout
+            stderrPipe = stderr
             outputBuffer = Data()
             outputStreamFinished = false
             pendingTerminationStatus = nil
@@ -143,6 +146,17 @@ final class WorkerClient: ObservableObject {
                     outputContinuation.yield(data)
                 }
             }
+            let stderrBudget = WorkerStderrBudget()
+            stderr.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
+                    return
+                }
+                guard let captured = stderrBudget.consume(data), !captured.isEmpty else { return }
+                // 只保留每个worker前256 KiB stderr，超限后继续排空管道，避免反压阻塞worker。
+                AssistantFileLog.appendWorkerStderr(String(decoding: captured, as: UTF8.self))
+            }
 
             try child.run()
             hasStartedWorker = true
@@ -153,6 +167,8 @@ final class WorkerClient: ObservableObject {
             process = nil
             inputPipe = nil
             outputPipe = nil
+            stderrPipe?.fileHandleForReading.readabilityHandler = nil
+            stderrPipe = nil
             connectionState = .failed
             state = nil
             lastErrorMessage = "无法启动受管助手，请检查App包内worker与Codex安装。"
@@ -375,9 +391,11 @@ final class WorkerClient: ObservableObject {
         let shutdownSucceeded = shutdownRequested
             && shutdownEvidence.confirmsCleanExit(outputClosed: true, terminationStatus: status)
         outputPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
         process = nil
         inputPipe = nil
         outputPipe = nil
+        stderrPipe = nil
         outputConsumerTask = nil
         state = nil
         pendingConfirmation = nil

@@ -3,7 +3,6 @@ import { access, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile }
 import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 
-export const DEFAULT_VAULT_ROOT = '/Users/example/ExampleVault';
 const SETTINGS_VERSION = 1;
 const MAX_SETTINGS_BYTES = 16 * 1024;
 
@@ -36,11 +35,14 @@ async function validatedRoot(candidate) {
 
 /**
  * Vault配置只由worker写入；临时文件与settings.json同目录，使用rename原子替换。
+ * 不内置默认Vault路径：未配置时只返回null，避免把维护者本机路径带进其他用户环境。
  */
-export function createVaultSettingsStore({ stateRoot, recommendedVaultRoot = DEFAULT_VAULT_ROOT } = {}) {
+export function createVaultSettingsStore({ stateRoot, recommendedVaultRoot = null } = {}) {
   if (typeof stateRoot !== 'string' || !path.isAbsolute(stateRoot)) {
     throw new TypeError('stateRoot必须是绝对路径');
   }
+  const recommended = typeof recommendedVaultRoot === 'string' && path.isAbsolute(recommendedVaultRoot)
+    ? recommendedVaultRoot : null;
   const settingsPath = path.join(stateRoot, 'settings.json');
   let revision = 0;
 
@@ -51,7 +53,7 @@ export function createVaultSettingsStore({ stateRoot, recommendedVaultRoot = DEF
       if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_SETTINGS_BYTES) {
         return {
           configured: false, vaultRoot: null, vaultName: null,
-          recommendedVaultRoot, errorCode: 'VAULT_SETTINGS_INVALID',
+          recommendedVaultRoot: recommended, errorCode: 'VAULT_SETTINGS_INVALID',
         };
       }
       raw = JSON.parse(await readFile(settingsPath, 'utf8'));
@@ -59,12 +61,12 @@ export function createVaultSettingsStore({ stateRoot, recommendedVaultRoot = DEF
       if (error?.code === 'ENOENT') {
         return {
           configured: false, vaultRoot: null, vaultName: null,
-          recommendedVaultRoot, errorCode: 'VAULT_NOT_CONFIGURED',
+          recommendedVaultRoot: recommended, errorCode: 'VAULT_NOT_CONFIGURED',
         };
       }
       return {
         configured: false, vaultRoot: null, vaultName: null,
-        recommendedVaultRoot, errorCode: 'VAULT_SETTINGS_INVALID',
+        recommendedVaultRoot: recommended, errorCode: 'VAULT_SETTINGS_INVALID',
       };
     }
 
@@ -72,7 +74,7 @@ export function createVaultSettingsStore({ stateRoot, recommendedVaultRoot = DEF
       || typeof raw.vaultRoot !== 'string' || !path.isAbsolute(raw.vaultRoot)) {
       return {
         configured: false, vaultRoot: null, vaultName: null,
-        recommendedVaultRoot, errorCode: 'VAULT_SETTINGS_INVALID',
+        recommendedVaultRoot: recommended, errorCode: 'VAULT_SETTINGS_INVALID',
       };
     }
     try {

@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { appendFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { execFile, spawn } from 'node:child_process';
 import { CdpSession, listCodexPageTargets } from './cdp-client.mjs';
@@ -13,11 +13,14 @@ import { isExecutableProcess, parseProcessSnapshot } from './process-snapshot.mj
 import { acquireAssistantLock } from './single-instance-lock.mjs';
 import { compatibilityErrorCode } from './compatibility-policy.mjs';
 import { isDirectExecution } from './entry-point.mjs';
-import { createVaultSettingsStore, DEFAULT_VAULT_ROOT } from './vault-settings.mjs';
+import { createVaultSettingsStore } from './vault-settings.mjs';
 import { formatLaunchFailure } from './launch-diagnostics.mjs';
 import { createCompatibilityCache } from './compatibility-cache.mjs';
 import { requestedDebuggingPorts } from './cdp-args.mjs';
 import { restorePrecondition } from './restore-policy.mjs';
+import { createLogWriter } from './log-file.mjs';
+import { readCompatibilityManifest } from './compatibility-file.mjs';
+import { createLaunchOwnershipStore, isOwnedVerifiedProcess } from './launch-ownership.mjs';
 
 const execFileAsync = promisify(execFile);
 function runtimeError(code) {
@@ -29,6 +32,10 @@ const TEAM_ID = '2DC432GLL2';
 export const ASSISTANT_STATE_ROOT = path.join(os.homedir(), 'Library/Application Support/CodexObsidianLinkAssistant');
 const STATE_ROOT = ASSISTANT_STATE_ROOT;
 const LOG_PATH = path.join(STATE_ROOT, 'assistant.log');
+const logWriter = createLogWriter({ filePath: LOG_PATH });
+const COMPATIBILITY_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)), '..', 'macOSApp', 'Resources', 'compatibility.json',
+);
 const APP_CANDIDATES = [
   '/Applications/Codex.app',
   path.join(os.homedir(), 'Applications/Codex.app'),
@@ -53,9 +60,8 @@ async function run(file, args, options = {}) {
 }
 
 async function log(event, detail = '') {
-  await mkdir(STATE_ROOT, { recursive: true, mode: 0o700 });
   const line = `${new Date().toISOString()} ${event}${detail ? ` ${detail}` : ''}\n`;
-  await appendFile(LOG_PATH, line, { mode: 0o600 });
+  await logWriter.append(line);
 }
 
 /** 追加一条单行日志；日志不可写时静默失败，不改变调用方结果。 */
@@ -481,10 +487,18 @@ async function supervise(bundle, runtime, port, {
 }
 
 async function runAssistant() {
+  // 旧CLI入口也必须先过兼容清单，避免绕过菜单App的版本/ASAR闸门。
+  const compatibility = await readCompatibilityManifest(COMPATIBILITY_PATH);
   const bundle = await findCodexBundle();
   if (stopping) return;
   const runtime = await verifySignedRuntime(bundle);
   if (stopping) return;
+  const installed = await installedCompatibilityFacts(bundle, runtime);
+  const compatibilityFailure = compatibilityErrorCode(installed, compatibility);
+  if (compatibilityFailure) {
+    await log('legacy-compatibility-rejected', `code=${compatibilityFailure}`);
+    throw runtimeError(compatibilityFailure);
+  }
   const vaultSettingsStore = createVaultSettingsStore({ stateRoot: ASSISTANT_STATE_ROOT });
   const vaultSettings = await vaultSettingsStore.read();
   if (!vaultSettings.configured) throw runtimeError(vaultSettings.errorCode ?? 'VAULT_NOT_CONFIGURED');
@@ -532,6 +546,22 @@ async function fileSha256(filePath) {
   return hash.digest('hex');
 }
 
+async function installedCompatibilityFacts(bundle, runtime) {
+  const [version, build, asarSha256] = await Promise.all([
+    bundleValue(bundle, 'CFBundleShortVersionString'),
+    bundleValue(bundle, 'CFBundleVersion'),
+    fileSha256(path.join(bundle, 'Contents/Resources/app.asar')),
+  ]);
+  return {
+    bundleId: 'com.openai.codex',
+    teamId: TEAM_ID,
+    version,
+    build,
+    appAsarSha256: asarSha256,
+    nodeMajor: runtime.major,
+  };
+}
+
 function processFingerprint(process, executable, port) {
   if (!process?.processStartTime || !process.command) return null;
   return createHash('sha256').update(JSON.stringify({
@@ -577,6 +607,7 @@ async function getOneProcess(executable) {
 export function createCodexRuntime({
   compatibility,
   vaultSettingsStore = createVaultSettingsStore({ stateRoot: ASSISTANT_STATE_ROOT }),
+  launchOwnershipStore = createLaunchOwnershipStore({ stateRoot: ASSISTANT_STATE_ROOT }),
   onSupervisorExit = null,
 } = {}) {
   let managedProcessFingerprint = null;
@@ -591,7 +622,7 @@ export function createCodexRuntime({
       vaultConfigured: vaultSettings?.configured === true,
       vaultRoot: selectedVaultRoot,
       vaultName: vaultSettings?.vaultName ?? null,
-      recommendedVaultRoot: vaultSettings ? vaultSettings.recommendedVaultRoot : DEFAULT_VAULT_ROOT,
+      recommendedVaultRoot: vaultSettings?.recommendedVaultRoot ?? null,
     });
   }
 
@@ -611,12 +642,14 @@ export function createCodexRuntime({
     ], async () => {
       const bundleId = await bundleValue(bundle, 'CFBundleIdentifier');
       const runtime = await verifySignedRuntime(bundle);
-      const [version, build, asarSha256] = await Promise.all([
-        bundleValue(bundle, 'CFBundleShortVersionString'),
-        bundleValue(bundle, 'CFBundleVersion'),
-        fileSha256(asarPath),
-      ]);
-      return { bundleId, runtime, version, build, asarSha256 };
+      const facts = await installedCompatibilityFacts(bundle, runtime);
+      return {
+        bundleId,
+        runtime,
+        version: facts.version,
+        build: facts.build,
+        asarSha256: facts.appAsarSha256,
+      };
     });
     const { bundleId, runtime, version, build, asarSha256 } = compatibilityFacts;
     // 所有inspect结果都必须携带bundle/runtime，否则启动动作会把undefined传给open。
@@ -682,7 +715,8 @@ export function createCodexRuntime({
         }),
       });
     }
-    const launchedHere = Boolean(endpoint && managedProcessFingerprint === fingerprint);
+    const launchedHere = Boolean(endpoint && (managedProcessFingerprint === fingerprint
+      || await isOwnedVerifiedProcess({ endpoint, fingerprint, store: launchOwnershipStore })));
     return {
       ...withBundleRuntime({
         mode: endpoint ? 'cdp-ready' : 'ordinary-running',
@@ -716,12 +750,13 @@ export function createCodexRuntime({
       try { await log('supervisor-failed', `code=${error?.code ?? 'unexpected-error'}`); } catch { /* 日志失败不覆盖原错误 */ }
       rejectReady(error);
       throw error;
-    }).finally(() => {
+    }).finally(async () => {
       const wasCurrent = managedSupervisor === supervisor;
       if (wasCurrent) managedSupervisor = null;
       // 主动停止会先清空managedSupervisor；只有仍然当前的supervisor才算Codex意外退出。
       if (wasCurrent && !controller.signal.aborted && supervisor.readyReached) {
         managedProcessFingerprint = null;
+        await launchOwnershipStore.forget().catch(() => {});
         try { onSupervisorExit?.({ reason: 'supervisor-exited' }); } catch { /* 状态回调失败不改变退出结果 */ }
       }
     });
@@ -756,6 +791,10 @@ export function createCodexRuntime({
     const fingerprint = processFingerprint(processes[0], runtime.executable, endpoint.port);
     if (!fingerprint) throw runtimeError('PROCESS_IDENTITY_UNAVAILABLE');
     managedProcessFingerprint = fingerprint;
+    // 写盘失败时仍保留本进程内的已验证身份；跨App重启恢复则安全地不可用。
+    await launchOwnershipStore.remember(fingerprint).catch(async () => {
+      await log('launch-ownership-save-failed');
+    });
     await log('cdp-verified', `port=${endpoint.port} source=app`);
     // 启动动作只把Codex带到可验证的CDP状态，注入留给connect动作。
     return await inspect();
@@ -854,6 +893,7 @@ export function createCodexRuntime({
       }
       await quitVerifiedCodex(targetFingerprint, 'ordinary-running');
       managedProcessFingerprint = null;
+      await launchOwnershipStore.forget().catch(() => {});
       return launchWithCdp(current.bundle, current.runtime);
     },
     async restoreOrdinary({ targetFingerprint, confirmed } = {}) {
@@ -868,6 +908,7 @@ export function createCodexRuntime({
       if (afterFailure) throw runtimeError(afterFailure);
       await quitVerifiedCodex(targetFingerprint, 'cdp-ready');
       managedProcessFingerprint = null;
+      await launchOwnershipStore.forget().catch(() => {});
       await run('/usr/bin/open', ['-a', after.bundle]);
       await waitForCodexProcess(after.runtime.executable);
       return await inspect();

@@ -1,37 +1,28 @@
 import Foundation
 
-/// 追加写入与worker共用的assistant.log；日志失败不影响界面操作。
+/// 追加写入与worker共用的日志；日志失败不影响界面操作。日志按1 MiB轮转，保留一个`.1`备份。
 enum AssistantFileLog {
     private static let queue = DispatchQueue(label: "CodexObsidianLinkAssistant.file-log")
-    private static let logURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/CodexObsidianLinkAssistant/assistant.log")
+    private static let directory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/CodexObsidianLinkAssistant")
+    private static let appWriter = FileLogWriter(directory: directory, fileName: "assistant.log")
+    private static let workerStderrWriter = FileLogWriter(directory: directory, fileName: "worker-stderr.log")
+
+    static var logURL: URL { appWriter.fileURL }
+    static var workerStderrURL: URL { workerStderrWriter.fileURL }
 
     static func append(_ event: String, _ detail: String = "") {
         let suffix = detail.isEmpty ? "" : " \(detail)"
         let line = "\(Date().ISO8601Format()) \(event)\(suffix)\n"
         queue.async {
-            write(line)
+            appWriter.append(line)
         }
     }
 
-    private static func write(_ line: String) {
-        guard let data = line.data(using: .utf8) else { return }
-        let directory = logURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        if !FileManager.default.fileExists(atPath: logURL.path) {
-            FileManager.default.createFile(
-                atPath: logURL.path,
-                contents: nil,
-                attributes: [.posixPermissions: 0o600]
-            )
+    static func appendWorkerStderr(_ text: String) {
+        guard !text.isEmpty else { return }
+        queue.async {
+            workerStderrWriter.append(text)
         }
-        guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
     }
 }

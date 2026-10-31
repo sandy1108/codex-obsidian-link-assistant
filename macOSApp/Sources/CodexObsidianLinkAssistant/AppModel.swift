@@ -351,11 +351,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var isActionPending = false
     @Published private(set) var isWaitingToExit = false
     @Published private(set) var draftVaultRoot = ""
+    @Published private(set) var confirmationSecondsRemaining: Int?
 
     private let workerClient: WorkerClient
     private var vaultDraftChanged = false
     private var terminationApproved = false
     private var terminationPending = false
+    private var confirmationCountdown: ConfirmationCountdown?
+    private var confirmationTimer: AnyCancellable?
 
     static weak var current: AppModel?
 
@@ -378,14 +381,24 @@ final class AppModel: ObservableObject {
     var dialogMessage: String {
         switch activeDialog {
         case .restartCodex:
-            return "当前 Codex 没有本助手可验证的调试入口。确认后会请求 Codex 正常退出，再由助手以 CDP 模式重新打开；启动后还需点击「连接 Codex CDP」。取消不会改变当前 Codex。"
+            return ConfirmationMessage.text(
+                base: "当前 Codex 没有本助手可验证的调试入口。确认后会请求 Codex 正常退出，再由助手以 CDP 模式重新打开；启动后还需点击「连接 Codex CDP」。取消不会改变当前 Codex。",
+                secondsRemaining: confirmationSecondsRemaining
+            )
         case .restoreOrdinaryCodex:
-            return "这会正常退出由助手启动的 Codex，再以普通方式打开。该进程上的其他 CDP 工具也会断开；身份变化或超时会停止，绝不强制结束。"
+            return ConfirmationMessage.text(
+                base: "这会正常退出由助手启动的 Codex，再以普通方式打开。该进程上的其他 CDP 工具也会断开；身份变化或超时会停止，绝不强制结束。",
+                secondsRemaining: confirmationSecondsRemaining
+            )
         case .exitAssistant:
             return "助手会先清理自身注入并退出。Codex 会继续运行，CDP 调试入口也可能继续保留。"
         case nil:
             return ""
         }
+    }
+
+    var isConfirmationExpired: Bool {
+        pendingConfirmation != nil && confirmationSecondsRemaining == 0
     }
 
     init(workerClient: WorkerClient = WorkerClient()) {
@@ -531,7 +544,7 @@ final class AppModel: ObservableObject {
     }
 
     func confirmPendingOperation() {
-        guard let prompt = pendingConfirmation, !isActionPending else { return }
+        guard let prompt = pendingConfirmation, !isActionPending, !isConfirmationExpired else { return }
         guard workerClient.send(.confirmRestart, confirmationID: prompt.confirmationID) != nil else { return }
         activeDialog = nil
         synchronizeFromWorker()
@@ -564,8 +577,7 @@ final class AppModel: ObservableObject {
     }
 
     func openLog() {
-        let logURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/CodexObsidianLinkAssistant/assistant.log")
+        let logURL = AssistantFileLog.logURL
         guard FileManager.default.fileExists(atPath: logURL.path), NSWorkspace.shared.open(logURL) else {
             errorMessage = "当前还没有助手日志。"
             return
@@ -586,6 +598,7 @@ final class AppModel: ObservableObject {
             }
         case .confirmationRequired(let prompt):
             pendingConfirmation = prompt
+            startConfirmationCountdown(for: prompt)
             activeDialog = prompt.reason == .restartOrdinaryCodex ? .restartCodex : .restoreOrdinaryCodex
         case .result(let result):
             if !result.ok {
@@ -616,6 +629,7 @@ final class AppModel: ObservableObject {
         }
         connectionState = workerClient.connectionState
         pendingConfirmation = workerClient.pendingConfirmation
+        if pendingConfirmation == nil { stopConfirmationCountdown() }
         isActionPending = workerClient.pendingRequestID != nil
         if let clientError = workerClient.lastErrorMessage {
             errorMessage = clientError
@@ -624,5 +638,42 @@ final class AppModel: ObservableObject {
            activeDialog == .restartCodex || activeDialog == .restoreOrdinaryCodex {
             activeDialog = nil
         }
+    }
+
+    private func startConfirmationCountdown(for prompt: ConfirmationPrompt) {
+        stopConfirmationCountdown()
+        let countdown = ConfirmationCountdown(seconds: prompt.expiresInSeconds)
+        confirmationCountdown = countdown
+        confirmationSecondsRemaining = countdown.secondsRemaining()
+        confirmationTimer = Timer.publish(every: 0.5, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] now in
+                Task { @MainActor [weak self] in
+                    self?.updateConfirmationCountdown(now: now)
+                }
+            }
+    }
+
+    private func updateConfirmationCountdown(now: Date) {
+        guard let countdown = confirmationCountdown, pendingConfirmation != nil else {
+            stopConfirmationCountdown()
+            return
+        }
+        let remaining = countdown.secondsRemaining(now: now)
+        if remaining != confirmationSecondsRemaining {
+            confirmationSecondsRemaining = remaining
+        }
+        // 到零后只停止刷新；确认按钮保持禁用，等待用户取消并重新发起。
+        if remaining == 0 {
+            confirmationTimer?.cancel()
+            confirmationTimer = nil
+        }
+    }
+
+    private func stopConfirmationCountdown() {
+        confirmationTimer?.cancel()
+        confirmationTimer = nil
+        confirmationCountdown = nil
+        confirmationSecondsRemaining = nil
     }
 }

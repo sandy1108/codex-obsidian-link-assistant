@@ -73,6 +73,7 @@ export async function resolveVaultFileHref(href, { vaultRoot, vaultName }) {
 
     const params = new URLSearchParams();
     params.set('vault', vaultName);
+    // URLSearchParams会把标题前的#编码为%23；Obsidian需要%23来区分标题，不能发送裸#。
     params.set('file', reference.heading
       ? `${normalizedRelativeNote}#${reference.heading}` : normalizedRelativeNote);
     return `obsidian://open?${params.toString()}`;

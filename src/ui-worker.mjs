@@ -1,6 +1,5 @@
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MAX_JSON_LINE_BYTES, parseWorkerRequest, serializeWorkerMessage } from './ui-protocol.mjs';
@@ -9,6 +8,7 @@ import { createManagedAssistant } from './managed-assistant.mjs';
 import { ASSISTANT_STATE_ROOT, appendAssistantLog, createCodexRuntime, getCurrentProcessStartTime } from './main.mjs';
 import { createVaultSettingsStore } from './vault-settings.mjs';
 import { isDirectExecution } from './entry-point.mjs';
+import { readCompatibilityManifest } from './compatibility-file.mjs';
 
 const MAX_REQUEST_IDS_PER_WORKER = 4096;
 const STARTUP_ERROR_CODES = new Set([
@@ -176,11 +176,7 @@ function fixedStartupCode(error) {
 async function loadCompatibility() {
   // 打包时ui-worker位于Resources/worker/src，兼容清单固定放在Resources/worker。
   const compatibilityPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'compatibility.json');
-  try { return JSON.parse(await readFile(compatibilityPath, 'utf8')); } catch {
-    const error = new Error('compatibility file unavailable');
-    error.code = 'COMPATIBILITY_MISSING';
-    throw error;
-  }
+  return readCompatibilityManifest(compatibilityPath);
 }
 
 async function startUiWorker() {

@@ -48,6 +48,24 @@ test('saves a validated single Vault atomically and reads the canonical path bac
   });
 });
 
+test('does not embed a default Vault path and ignores an invalid recommendation', async () => {
+  await withDirectories(async ({ stateRoot }) => {
+    const store = createVaultSettingsStore({ stateRoot });
+    assert.deepEqual(await store.read(), {
+      configured: false,
+      vaultRoot: null,
+      vaultName: null,
+      recommendedVaultRoot: null,
+      errorCode: 'VAULT_NOT_CONFIGURED',
+    });
+    const invalidRecommendation = createVaultSettingsStore({
+      stateRoot,
+      recommendedVaultRoot: 'relative/path',
+    });
+    assert.equal((await invalidRecommendation.read()).recommendedVaultRoot, null);
+  });
+});
+
 test('rejects a directory without an initialized Obsidian config and preserves saved settings', async () => {
   await withDirectories(async ({ temp, stateRoot, vaultRoot }) => {
     const invalidRoot = path.join(temp, 'ordinary folder');

@@ -14,10 +14,10 @@
 
 ## Vault配置
 
-- 菜单浮窗只支持一个Vault。首次使用时通过“选择文件夹…”选择已初始化且含`.obsidian`目录的Vault，再点击“保存并应用”；建议路径只用于预填，不会自动保存。
+- 菜单浮窗只支持一个Vault。首次使用时通过“选择文件夹…”选择已初始化且含`.obsidian`目录的Vault，再点击“保存并应用”；未配置时不预填维护者的本机路径。
 - worker将版本号和规范化后的Vault路径原子保存至`~/Library/Application Support/CodexObsidianLinkAssistant/settings.json`。配置缺失或无效时不会猜测或自动创建Vault，需从浮窗重新选择。
-- 当前源码已包含绝对路径识别、单Vault配置、残留锁自动恢复、启动/连接分步操作和全链路错误日志。0.1.6（build 6）为换用新菜单栏图标的测试包，用户可自行安装和验收；构建脚本不会替换已安装助手。
-- 0.1.6之后的源码还包含：worker崩溃后可在浮窗内重启、Codex退出后界面自动降级为未连接、零页面警告、兼容性核验缓存、恢复普通Codex前先校验、仅带端口参数的外部CDP识别，以及Cmd+Q复用清理确认。这些改动尚未打包。
+- 当前源码已包含绝对路径识别、单Vault配置、残留锁自动恢复、启动/连接分步操作和全链路错误日志。0.1.7（build 7）测试包包含worker崩溃后浮窗恢复、Codex退出后的状态降级、零页面警告、兼容性缓存、恢复前二次校验、外部CDP识别和Cmd+Q清理确认；构建脚本不会替换已安装助手。
+- 0.1.7还包含有上限的日志轮转与worker stderr记录、浮窗版本号和确认倒计时、渲染扫描节流、`#heading`编码回归检查、旧CLI兼容性闸门，以及助手启动的Codex进程指纹持久化。指纹只在可信CDP端点与当前进程完全匹配时用于恢复“本助手启动”身份；退出助手不清除，恢复普通Codex或意外退出时清除。真实菜单栏与Codex/Obsidian交互仍待安装验收。
 
 ## 构建本机App与DMG
 
@@ -26,7 +26,7 @@
 在Finder中依次打开：
 
 1. `bin/build-menu-app.command`：构建 `dist/Codex笔记链接助手.app`。
-2. `bin/build-dmg.command`：生成 `dist/Codex笔记链接助手-0.1.6-arm64.dmg`。
+2. `bin/build-dmg.command`：生成 `dist/Codex笔记链接助手-0.1.7-arm64.dmg`。
 
 脚本拒绝覆盖已有产物。DMG只包含App、“应用程序”快捷方式和安装/恢复说明；构建不会安装App、替换现有桌面入口或设置登录项。
 
@@ -44,7 +44,7 @@ swift build -c release --package-path macOSApp
 
 ## 日志、恢复与卸载
 
-- 日志：`~/Library/Application Support/CodexObsidianLinkAssistant/assistant.log`；不记录聊天正文、笔记路径或Obsidian URI。
+- 日志：`~/Library/Application Support/CodexObsidianLinkAssistant/assistant.log`及`worker-stderr.log`；各保留当前文件和一个`.1`轮转备份。操作日志不记录聊天正文、笔记路径或Obsidian URI；stderr用于诊断worker异常，查看或分享前请自行检查内容。
 - 退出前清理未获确认时，面板保持打开并显示状态待核验；不要强杀worker或删除锁文件来掩盖状态。
 - App无法启动时，可从 `/Applications/Codex.app` 手动打开普通Codex；本工具没有修改官方应用或用户数据。
 - 卸载时先从助手菜单退出，再由用户手动移除`/Applications/Codex笔记链接助手.app`。日志和源码保留，不自动删除用户级数据。

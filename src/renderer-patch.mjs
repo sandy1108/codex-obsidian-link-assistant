@@ -64,6 +64,10 @@ export function buildRendererSource({ bindingName, vaultFileUrlPrefix, vaultRoot
     let nextTooltipId = 0;
     let observer = null;
     let frame = 0;
+    let timer = 0;
+    let lastDecoratedAt = 0;
+    // 长会话里流式输出会连续触发MutationObserver；合并为约120ms一次的全量扫描。
+    const decorateInterval = 120;
     const targetHref = (target) => target.getAttribute('data-prompt-link-href') ?? target.getAttribute('href');
     // 样式只作用于本工具按钮，并随隔离世界清理，避免污染Codex其它控件。
     const stylesheet = document.createElement('style');
@@ -170,6 +174,7 @@ export function buildRendererSource({ bindingName, vaultFileUrlPrefix, vaultRoot
     };
     const decorate = () => {
       frame = 0;
+      lastDecoratedAt = Date.now();
       // SPA替换回答内容后同步移除孤立按钮和监听器，避免累计旧页面节点。
       for (const [button, record] of buttons) {
         if (!button.isConnected || !record.target.isConnected || !eligible(targetHref(record.target))) {
@@ -233,11 +238,21 @@ export function buildRendererSource({ bindingName, vaultFileUrlPrefix, vaultRoot
       return button;
     };
     const schedule = () => {
-      if (!frame) frame = requestAnimationFrame(decorate);
+      if (frame || timer) return;
+      const wait = decorateInterval - (Date.now() - lastDecoratedAt);
+      if (wait <= 0) {
+        frame = requestAnimationFrame(decorate);
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = 0;
+        frame = requestAnimationFrame(decorate);
+      }, wait);
     };
     const cleanup = () => {
       observer?.disconnect();
       if (frame) cancelAnimationFrame(frame);
+      if (timer) clearTimeout(timer);
       for (const button of [...buttons.keys()]) removeButton(button);
       stylesheet.remove();
       window.removeEventListener('pagehide', cleanup);
