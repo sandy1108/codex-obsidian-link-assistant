@@ -57,7 +57,7 @@ export function readQuotaSnapshot(cliPath, { timeoutMs = 12000 } = {}) {
       }
     });
     send({ id: 1, method: 'initialize', params: {
-      clientInfo: { name: 'codex-obsidian-link-assistant', version: '0.1.8' },
+      clientInfo: { name: 'codex-obsidian-link-assistant', version: '0.1.9' },
       capabilities: { experimentalApi: true },
     } });
   });

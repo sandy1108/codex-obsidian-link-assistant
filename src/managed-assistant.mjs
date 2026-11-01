@@ -48,6 +48,7 @@ function normalizedState(source = {}) {
     quotaRefreshMinutes: Number.isInteger(source.quotaRefreshMinutes)
       && source.quotaRefreshMinutes >= 1 && source.quotaRefreshMinutes <= 60
       ? source.quotaRefreshMinutes : 5,
+    forceCompatible: source.forceCompatible === true,
     errorCode: FIXED_ERROR_CODES.has(source.errorCode) ? source.errorCode : null,
   };
 }
@@ -343,6 +344,20 @@ export function createManagedAssistant({ runtime, clock = Date.now, tokenFactory
     }
   }
 
+  // 一次性强兼容授权：身份键由runtime按本机安装事实自算，界面只能表达意愿，授权只存活于当前会话。
+  async function forceCompatibilityImpl() {
+    if (shutdownComplete) throw assistantError('WORKER_STOPPING');
+    try {
+      if (typeof runtime.grantForceCompatibility !== 'function') throw assistantError('STATE_UNAVAILABLE');
+      const result = await runtime.grantForceCompatibility();
+      applyRuntimeResult(result);
+      if (current.errorCode) throw assistantError(current.errorCode);
+      if (workerState === 'error') workerState = 'observing';
+      await publishState();
+      return { ok: true, code: 'force-compatibility-granted' };
+    } catch (error) { return fail(error); }
+  }
+
   async function shutdownImpl() {
     if (shutdownComplete) return { ok: true, code: 'shutdown' };
     shutdownComplete = true;
@@ -383,6 +398,7 @@ export function createManagedAssistant({ runtime, clock = Date.now, tokenFactory
     restoreOrdinary: (request) => enqueue(restoreOrdinaryImpl, request),
     configureVault: (request) => enqueue(configureVaultImpl, request),
     configureQuotaRefresh: (request) => enqueue(configureQuotaRefreshImpl, request),
+    forceCompatibility: (request) => enqueue(forceCompatibilityImpl, request),
     shutdown: (request) => enqueue(shutdownImpl, request),
   };
 }

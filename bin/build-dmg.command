@@ -6,7 +6,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PRODUCT_NAME="Codex笔记链接助手"
 DIST_DIR="$REPO_ROOT/dist"
 APP_BUNDLE="$DIST_DIR/$PRODUCT_NAME.app"
-DMG_OUTPUT="$DIST_DIR/$PRODUCT_NAME-0.1.8-arm64.dmg"
+DMG_OUTPUT="$DIST_DIR/$PRODUCT_NAME-0.1.9-arm64.dmg"
 WORK_DIR=""
 MOUNT_POINT=""
 MOUNTED=0
@@ -52,7 +52,7 @@ mkdir -p "$STAGING" "$MOUNT_POINT"
 
 cat > "$STAGING/安装与恢复说明.txt" <<'NOTES'
 Codex笔记链接助手 · 安装与恢复
-版本：0.1.8（build 8），Apple Silicon测试包。
+版本：0.1.9（build 9），Apple Silicon测试包。
 
 安装
 1. 将“Codex笔记链接助手.app”拖到右侧“应用程序”快捷方式。
@@ -69,7 +69,8 @@ Codex笔记链接助手 · 安装与恢复
 - 本版包含worker异常退出后恢复、确认倒计时、进程指纹持久化及日志轮转。若恢复按钮不可用，先查看状态与日志，不手工修改指纹文件。
 
 恢复与卸载
-- 助手无法启动时，可从“应用程序”打开标准Codex.app。此工具不会修改Codex.app或Codex用户数据。
+- 助手无法启动时，可从“应用程序”打开标准Codex（新版包名为ChatGPT.app，旧版为Codex.app）。此工具不会修改Codex应用包或Codex用户数据。
+- Codex更新后若提示“未列入兼容清单”，可在浮窗里选择“强行兼容一次（仅本次会话）”试跑；它只跳过版本清单比对，签名与调试入口校验仍然生效，退出助手即恢复默认校验。
 - 从助手菜单退出后，可由用户手动将“应用程序”中的助手移到废纸篓。它不设置登录项；日志保留在“~/Library/Application Support/CodexObsidianLinkAssistant/”。
 - 不要为了修复状态而删除锁文件、改动Codex签名、关闭系统安全功能或清除隔离属性。
 

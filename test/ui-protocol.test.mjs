@@ -91,3 +91,30 @@ test('state messages expose only bounded Vault settings fields', () => {
     recommendedVaultRoot: null, obsidianUri: 'obsidian://open',
   }));
 });
+
+test('强兼容授权请求是纯动作，界面不能注入身份键或确认票据', () => {
+  assert.deepEqual(parseWorkerRequest(request('forceCompatibility')), {
+    v: 1, type: 'request', id: requestId, action: 'forceCompatibility',
+  });
+  for (const line of [
+    request('forceCompatibility', { identityKey: '0'.repeat(64) }),
+    request('forceCompatibility', { confirmationId }),
+    request('forceCompatibility', { version: '26.1027.51404' }),
+  ]) {
+    assert.throws(() => parseWorkerRequest(line));
+  }
+});
+
+test('state exposes the one-shot force flag only as a boolean', () => {
+  const line = serializeWorkerMessage({
+    v: 1, type: 'state', seq: 2, codex: 'running', cdp: 'closed', worker: 'observing',
+    pageCount: 0, forceCompatible: true,
+  });
+  assert.equal(JSON.parse(line).forceCompatible, true);
+  for (const value of ['true', 1, null]) {
+    assert.throws(() => serializeWorkerMessage({
+      v: 1, type: 'state', seq: 2, codex: 'running', cdp: 'closed', worker: 'observing',
+      pageCount: 0, forceCompatible: value,
+    }));
+  }
+});

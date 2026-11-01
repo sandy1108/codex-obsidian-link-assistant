@@ -23,32 +23,38 @@
 
 ## 构建本机App与DMG
 
-当前构建目标为Apple Silicon，需本机Xcode/Swift、`/Applications/Codex.app`或`~/Applications/Codex.app`及其签名Node。构建脚本先核对Codex Bundle ID、Team ID、版本、build、`app.asar` SHA-256和Node主版本；任一值不匹配即停止。
+当前构建目标为Apple Silicon，需本机Xcode/Swift、Codex桌面包及其签名Node。Codex新版安装名为`/Applications/ChatGPT.app`（Bundle ID仍是`com.openai.codex`），旧版为`/Applications/Codex.app`，两者及`~/Applications`下的同名包都会被探测。构建脚本先核对Codex Bundle ID、Team ID、版本、build、`app.asar` SHA-256和Node主版本；任一值不匹配即停止。
 
 在Finder中依次打开：
 
 1. `bin/build-menu-app.command`：构建 `dist/Codex笔记链接助手.app`。
-2. `bin/build-dmg.command`：生成 `dist/Codex笔记链接助手-0.1.8-arm64.dmg`。
+2. `bin/build-dmg.command`：生成 `dist/Codex笔记链接助手-0.1.9-arm64.dmg`。
 
 脚本拒绝覆盖已有产物。DMG只包含App、“应用程序”快捷方式和安装/恢复说明；构建不会安装App、替换现有桌面入口或设置登录项。
+
+`build-menu-app.command`在编译前会用兼容清单校验本机Codex身份，不符即停止。只有在你明确知道本机Codex未列入清单、仍要打测试包时，才显式设 `ALLOW_UNLISTED_CODEX=1` 放行这道构建自检；它不改动包内清单，也不放宽运行时校验，安装后仍需用户在浮窗点「强行兼容一次」。
 
 App采用ad-hoc代码签名并启用Hardened Runtime；DMG不签名、不公证。首次打开可能出现macOS对单个App的确认。只在核对来源并信任本机生成的构建时，按Finder或“系统设置 → 隐私与安全性”显示的单应用流程操作。不要关闭Gatekeeper/SIP或清除隔离属性；系统未提供单应用选项时停止。构建与签名核验命令见 `bin/build-menu-app.command`，恢复说明见 [RECOVER.md](RECOVER.md)。
 
 ## 开发检查
 
 ```sh
-"/Applications/Codex.app/Contents/Resources/cua_node/bin/node" --test
+"/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node" --test
 swift test --package-path macOSApp
 swift build -c release --package-path macOSApp
 ```
 
-当前兼容性清单位于 `macOSApp/Resources/compatibility.json`。Codex升级后如版本、build或ASAR哈希变化，App会停止注入；维护者需重新检查页面结构与安全边界后，才可修改清单。
+Node测试必须在仓库根执行（把目录当参数传给`--test`会被解析成模块名）。本机仍安装旧包名时，可改用`/Applications/Codex.app/Contents/Resources/cua_node/bin/node`。
+
+当前兼容性清单位于 `macOSApp/Resources/compatibility.json`。Codex升级后如版本、build或ASAR哈希变化，App会拒绝启动/连接并提示未列入兼容清单；维护者需重新检查页面结构与安全边界后，才可修改清单，构建脚本同样会按清单校验本机Codex身份。
+
+清单未命中时，浮窗提供“强行兼容一次（仅本次会话）”：用户明确允许后，worker只跳过版本、build和`app.asar`哈希这三项与清单的比对，签名校验（Bundle ID、Team ID、codesign requirement）、内置Node主版本下限、CDP端点可信检查和进程身份校验全部照旧。授权身份键由worker按本机实测事实算出，界面无法注入；只存活于当前worker进程内存，不写入任何文件，Codex再次更新后身份键变化即自动失效，退出助手也恢复默认校验。旧CLI入口（`bin/start.command`）没有这个开关，仍然硬拦。
 
 ## 日志、恢复与卸载
 
 - 日志：`~/Library/Application Support/CodexObsidianLinkAssistant/assistant.log`及`worker-stderr.log`；各保留当前文件和一个`.1`轮转备份。操作日志不记录聊天正文、笔记路径或Obsidian URI；stderr用于诊断worker异常，查看或分享前请自行检查内容。
 - 退出前清理未获确认时，面板保持打开并显示状态待核验；不要强杀worker或删除锁文件来掩盖状态。
-- App无法启动时，可从 `/Applications/Codex.app` 手动打开普通Codex；本工具没有修改官方应用或用户数据。
+- App无法启动时，可从 `/Applications/ChatGPT.app`（旧版为 `/Applications/Codex.app`）手动打开普通Codex；本工具没有修改官方应用或用户数据。
 - 卸载时先从助手菜单退出，再由用户手动移除`/Applications/Codex笔记链接助手.app`。日志和源码保留，不自动删除用户级数据。
 - 旧源码CLI入口仍保留供维护；构建菜单栏App不会安装或替换它。
 

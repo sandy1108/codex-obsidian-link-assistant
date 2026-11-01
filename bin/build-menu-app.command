@@ -6,8 +6,8 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 USER_HOME="$(/usr/bin/printenv HOME)"
 PRODUCT_NAME="Codex笔记链接助手"
 BUNDLE_IDENTIFIER="local.codex-obsidian-link-assistant"
-PRODUCT_VERSION="0.1.8"
-PRODUCT_BUILD="8"
+PRODUCT_VERSION="0.1.9"
+PRODUCT_BUILD="9"
 DIST_DIR="$REPO_ROOT/dist"
 APP_OUTPUT="$DIST_DIR/$PRODUCT_NAME.app"
 RESOURCE_DIR="$REPO_ROOT/macOSApp/Resources"
@@ -54,13 +54,15 @@ for icon_file in "${ICON_FILES[@]}"; do
 done
 
 CODEX_APP=""
-for candidate in "/Applications/Codex.app" "$USER_HOME/Applications/Codex.app"; do
+# Codex新版把安装包改名为ChatGPT.app（Bundle ID仍是com.openai.codex），两种名字都要探测。
+for candidate in "/Applications/Codex.app" "$USER_HOME/Applications/Codex.app" \
+  "/Applications/ChatGPT.app" "$USER_HOME/Applications/ChatGPT.app"; do
   if [[ -x "$candidate/Contents/Resources/cua_node/bin/node" ]]; then
     CODEX_APP="$candidate"
     break
   fi
 done
-[[ -n "$CODEX_APP" ]] || fail "找不到含签名内置Node的Codex.app。"
+[[ -n "$CODEX_APP" ]] || fail "找不到含签名内置Node的Codex.app或ChatGPT.app。"
 CODEX_NODE="$CODEX_APP/Contents/Resources/cua_node/bin/node"
 CODEX_ASAR="$CODEX_APP/Contents/Resources/app.asar"
 [[ -f "$CODEX_ASAR" ]] || fail "Codex.app缺少app.asar。"
@@ -75,6 +77,11 @@ INSTALLED_ASAR_HASH="$(/usr/bin/shasum -a 256 "$CODEX_ASAR" | /usr/bin/awk '{pri
 INSTALLED_NODE_VERSION="$("$CODEX_NODE" --version)"
 INSTALLED_NODE_MAJOR="${INSTALLED_NODE_VERSION#v}"
 INSTALLED_NODE_MAJOR="${INSTALLED_NODE_MAJOR%%.*}"
+# 打包前置自检分三级退出码：0=本机符合清单；1=清单不可读或字段非法（硬失败，不可跳过）；
+# 2=本机身份与清单不符，仅在显式设置ALLOW_UNLISTED_CODEX=1时放行。
+# 放行只放宽这道构建自检：包内compatibility.json与worker运行时校验都不变，
+# 安装后运行时仍会报VERSION_UNSUPPORTED，需用户在浮窗点「强行兼容一次」才生效。
+COMPAT_CHECK=0
 COMPATIBILITY_FILE="$COMPATIBILITY_FILE" \
   INSTALLED_BUNDLE_ID="$INSTALLED_BUNDLE_ID" \
   INSTALLED_TEAM_ID="$INSTALLED_TEAM_ID" \
@@ -82,21 +89,19 @@ COMPATIBILITY_FILE="$COMPATIBILITY_FILE" \
   INSTALLED_BUILD="$INSTALLED_BUILD" \
   INSTALLED_ASAR_HASH="$INSTALLED_ASAR_HASH" \
   INSTALLED_NODE_MAJOR="$INSTALLED_NODE_MAJOR" \
-  "$CODEX_NODE" --input-type=module <<'NODE'
+  "$CODEX_NODE" --input-type=module <<'NODE' || COMPAT_CHECK=$?
 import { readFileSync } from 'node:fs';
-
-const fail = () => {
-  process.stderr.write('构建已停止：当前Codex身份、版本、build、ASAR或Node不符合兼容清单。\n');
-  process.exit(1);
-};
 
 let approved;
 try {
   approved = JSON.parse(readFileSync(process.env.COMPATIBILITY_FILE, 'utf8'));
 } catch {
-  fail();
+  process.stderr.write('兼容清单无法读取或不是合法JSON。\n');
+  process.exit(1);
 }
 
+// 逐项收集差异并打印，放行时构建输出里留下真实原因，而不是一句笼统的“不符合清单”。
+const mismatches = [];
 const exactValues = {
   bundleId: process.env.INSTALLED_BUNDLE_ID,
   teamId: process.env.INSTALLED_TEAM_ID,
@@ -105,13 +110,39 @@ const exactValues = {
   appAsarSha256: process.env.INSTALLED_ASAR_HASH,
 };
 for (const [key, actual] of Object.entries(exactValues)) {
-  if (approved?.[key] !== actual) fail();
+  if (approved?.[key] !== actual) {
+    mismatches.push(`${key}: 清单=${approved?.[key] ?? '缺失'} 本机=${actual ?? '未知'}`);
+  }
+}
+if (!Number.isInteger(approved?.minimumNodeMajor)) {
+  process.stderr.write('兼容清单缺少合法的minimumNodeMajor。\n');
+  process.exit(1);
 }
 const nodeMajor = Number(process.env.INSTALLED_NODE_MAJOR);
-if (!Number.isInteger(approved?.minimumNodeMajor)
-  || !Number.isInteger(nodeMajor)
-  || nodeMajor < approved.minimumNodeMajor) fail();
+if (!Number.isInteger(nodeMajor)) {
+  process.stderr.write('无法确定Codex内置Node的主版本号。\n');
+  process.exit(1);
+}
+if (nodeMajor < approved.minimumNodeMajor) {
+  mismatches.push(`minimumNodeMajor: 清单要求>=${approved.minimumNodeMajor} 本机=${nodeMajor}`);
+}
+if (mismatches.length > 0) {
+  for (const line of mismatches) process.stderr.write(`  清单不符 ${line}\n`);
+  process.exit(2);
+}
 NODE
+
+if [[ "$COMPAT_CHECK" == "2" ]]; then
+  if [[ "${ALLOW_UNLISTED_CODEX:-0}" == "1" ]]; then
+    print -u2 -- "警告：本机Codex未列入兼容清单，已按ALLOW_UNLISTED_CODEX=1继续构建。"
+    print -u2 -- "本机Codex：$CODEX_APP 版本$INSTALLED_VERSION/build $INSTALLED_BUILD。"
+    print -u2 -- "包内清单未改动，安装后助手仍会报VERSION_UNSUPPORTED，需手动点「强行兼容一次」试跑。"
+  else
+    fail "当前Codex身份、版本、build、ASAR或Node不符合兼容清单；确知风险后可设ALLOW_UNLISTED_CODEX=1重试。"
+  fi
+elif [[ "$COMPAT_CHECK" != "0" ]]; then
+  fail "兼容清单自检无法完成。"
+fi
 
 mkdir -p "$DIST_DIR"
 BUILD_WORKDIR="$(/usr/bin/mktemp -d "$DIST_DIR/.app-build.XXXXXX")"

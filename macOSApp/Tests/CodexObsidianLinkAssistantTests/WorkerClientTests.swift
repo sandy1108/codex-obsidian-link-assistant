@@ -112,6 +112,53 @@ final class WorkerClientTests: XCTestCase {
         }
     }
 
+    func testCodexNodeCandidatesCoverRenamedChatGPTBundle() {
+        // worker的node与runtime的bundle必须按同一顺序探测，否则会各挑一个不同的应用包。
+        let candidates = WorkerClient.codexNodeCandidatePaths(home: "/Users/example")
+        let expected = [
+            "/Applications/Codex.app/Contents/Resources/cua_node/bin/node",
+            "/Users/example/Applications/Codex.app/Contents/Resources/cua_node/bin/node",
+            "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
+            "/Users/example/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
+        ]
+        XCTAssertEqual(candidates, expected)
+    }
+
+    func testForceCompatibleFlagDrivesOneShotAvailability() throws {
+        XCTAssertEqual(WorkerAction.forceCompatibility.rawValue, "forceCompatibility")
+
+        func decodedState(_ errorCode: String, forceCompatible: Bool) throws -> AssistantState {
+            let line = #"{"v":1,"type":"state","seq":11,"codex":"unknown","cdp":"unknown","worker":"error","pageCount":0,"launchSource":"unknown","errorCode":"\#(errorCode)","vaultConfigured":true,"forceCompatible":\#(forceCompatible ? "true" : "false")}"#
+            guard case .state(let decoded) = try WorkerProtocol.decode(Data(line.utf8)) else {
+                throw WorkerProtocolError.invalidMessage
+            }
+            return decoded
+        }
+
+        let unsupported = try decodedState("VERSION_UNSUPPORTED", forceCompatible: false)
+        XCTAssertEqual(unsupported.forceCompatible, false)
+        let actions = WorkerActionAvailability(state: unsupported)
+        XCTAssertTrue(actions.canForceTry)
+        XCTAssertTrue(actions.canRefresh)
+        XCTAssertFalse(actions.canLaunch)
+        XCTAssertFalse(actions.canConnect)
+
+        // 已授权后同一会话不再重复提供入口；签名失败与正常状态都不提供。
+        XCTAssertFalse(WorkerActionAvailability(state: try decodedState("VERSION_UNSUPPORTED", forceCompatible: true)).canForceTry)
+        XCTAssertFalse(WorkerActionAvailability(state: try decodedState("SIGNATURE_MISMATCH", forceCompatible: false)).canForceTry)
+        XCTAssertFalse(WorkerActionAvailability(state: try decodedState("COMPATIBILITY_MISSING", forceCompatible: false)).canForceTry)
+        XCTAssertFalse(WorkerActionAvailability(state: try decodedState("CODEX_NOT_FOUND", forceCompatible: false)).canForceTry)
+        XCTAssertFalse(WorkerActionAvailability(state: nil).canForceTry)
+
+        let grantedLine = #"{"v":1,"type":"state","seq":12,"codex":"running","cdp":"verified","worker":"active","pageCount":1,"launchSource":"app","errorCode":null,"forceCompatible":true}"#
+        guard case .state(let grantedState) = try WorkerProtocol.decode(Data(grantedLine.utf8)) else {
+            return XCTFail("应解码为强兼容放行状态")
+        }
+        XCTAssertEqual(grantedState.forceCompatible, true)
+        XCTAssertTrue(WorkerActionAvailability(state: grantedState).canPause)
+        XCTAssertFalse(WorkerActionAvailability(state: grantedState).canForceTry)
+    }
+
     func testMapsFixedWorkerErrorsToChineseMessages() {
         XCTAssertTrue(WorkerErrorPresentation.message(for: "VERSION_UNSUPPORTED").contains("未列入兼容清单"))
         XCTAssertTrue(WorkerErrorPresentation.message(for: "PROCESS_EXIT_TIMEOUT").contains("未强制结束"))
@@ -362,6 +409,7 @@ final class WorkerClientTests: XCTestCase {
     private static func availableNode() -> URL? {
         [
             "/Applications/Codex.app/Contents/Resources/cua_node/bin/node",
+            "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
             "/opt/homebrew/bin/node",
             "/usr/local/bin/node",
             "/usr/bin/node",

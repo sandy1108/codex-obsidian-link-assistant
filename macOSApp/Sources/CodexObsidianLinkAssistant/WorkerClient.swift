@@ -286,15 +286,20 @@ final class WorkerClient: ObservableObject {
         WorkerLaunchPaths(node: try codexNodeURL(), worker: try bundledWorkerURL())
     }
 
+    nonisolated static func codexNodeCandidatePaths(home: String) -> [String] {
+        // 与worker的APP_CANDIDATES保持同一顺序，避免Swift与Node各挑一个不同的应用包。
+        [
+            "/Applications/Codex.app",
+            "\(home)/Applications/Codex.app",
+            "/Applications/ChatGPT.app",
+            "\(home)/Applications/ChatGPT.app",
+        ].map { "\($0)/Contents/Resources/cua_node/bin/node" }
+    }
+
     private nonisolated static func codexNodeURL() throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let bundles = [
-            URL(fileURLWithPath: "/Applications/Codex.app"),
-            home.appendingPathComponent("Applications/Codex.app"),
-        ]
-        for bundle in bundles {
-            let candidate = bundle.appendingPathComponent("Contents/Resources/cua_node/bin/node")
-            if FileManager.default.isExecutableFile(atPath: candidate.path) { return candidate }
+        let fileManager = FileManager.default
+        for candidate in codexNodeCandidatePaths(home: fileManager.homeDirectoryForCurrentUser.path) {
+            if fileManager.isExecutableFile(atPath: candidate) { return URL(fileURLWithPath: candidate) }
         }
         throw WorkerClientFailure.runtimeNotFound
     }

@@ -4,7 +4,7 @@ const CONFIRMATION_ID_PATTERN = /^[A-Za-z0-9_-]{32,128}$/u;
 const ACTIONS = new Set([
   'refresh', 'launch', 'connect', 'confirmRestart', 'cancelConfirmation',
   'pause', 'resume', 'restoreOrdinary', 'shutdown', 'configureVault',
-  'configureQuotaRefresh',
+  'configureQuotaRefresh', 'forceCompatibility',
 ]);
 const CONFIRMATION_ACTIONS = new Set(['confirmRestart', 'cancelConfirmation']);
 
@@ -90,7 +90,7 @@ function validWorkerMessage(message) {
       const optional = [
         'codexVersion', 'codexBuild', 'port', 'launchSource', 'errorCode',
         'vaultConfigured', 'vaultRoot', 'vaultName', 'recommendedVaultRoot',
-        'quotaRefreshMinutes',
+        'quotaRefreshMinutes', 'forceCompatible',
       ];
       return exactKeys(message, required, optional)
         && Number.isSafeInteger(message.seq) && message.seq >= 0
@@ -101,6 +101,7 @@ function validWorkerMessage(message) {
         && (message.quotaRefreshMinutes === undefined
           || (Number.isInteger(message.quotaRefreshMinutes)
             && message.quotaRefreshMinutes >= 1 && message.quotaRefreshMinutes <= 60))
+        && (message.forceCompatible === undefined || typeof message.forceCompatible === 'boolean')
         && (message.codexVersion === undefined || message.codexVersion === null
           || (typeof message.codexVersion === 'string' && /^\d+(?:\.\d+){1,4}$/u.test(message.codexVersion)))
         && (message.codexBuild === undefined || message.codexBuild === null

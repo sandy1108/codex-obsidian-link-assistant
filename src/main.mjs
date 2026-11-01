@@ -11,7 +11,9 @@ import { buildRendererSource } from './renderer-patch.mjs';
 import { classifyCodexLaunchState } from './launch-policy.mjs';
 import { isExecutableProcess, parseProcessSnapshot } from './process-snapshot.mjs';
 import { acquireAssistantLock } from './single-instance-lock.mjs';
-import { compatibilityErrorCode } from './compatibility-policy.mjs';
+import {
+  compatibilityErrorCode, compatibilityIdentityKey, forceCompatibilityErrorCode,
+} from './compatibility-policy.mjs';
 import { isDirectExecution } from './entry-point.mjs';
 import { createVaultSettingsStore } from './vault-settings.mjs';
 import { formatLaunchFailure } from './launch-diagnostics.mjs';
@@ -608,7 +610,7 @@ function processFingerprint(process, executable, port) {
 function runtimeState({
   codex, cdp, pageCount = 0, version, build, port = null, launchSource, errorCode = null,
   vaultConfigured = false, vaultRoot = null, vaultName = null, recommendedVaultRoot = null,
-  quotaRefreshMinutes = 5,
+  quotaRefreshMinutes = 5, forceCompatible = false,
 }) {
   return {
     codex,
@@ -624,6 +626,7 @@ function runtimeState({
     vaultName,
     recommendedVaultRoot,
     quotaRefreshMinutes,
+    forceCompatible,
   };
 }
 
@@ -649,6 +652,9 @@ export function createCodexRuntime({
   let managedSupervisor = null;
   let vaultSettings = null;
   let quotaRefreshMinutes = 5;
+  // 一次性强兼容授权的身份键与放行标记，都只存活于当前worker会话内存。
+  let forceCompatibilityKey = null;
+  let forceCompatibilityActive = false;
 
   function stateFor(fields) {
     const selectedVaultRoot = vaultSettings?.vaultRoot ?? null;
@@ -660,6 +666,7 @@ export function createCodexRuntime({
       vaultName: vaultSettings?.vaultName ?? null,
       recommendedVaultRoot: vaultSettings?.recommendedVaultRoot ?? null,
       quotaRefreshMinutes,
+      forceCompatible: forceCompatibilityActive,
     });
   }
 
@@ -690,16 +697,27 @@ export function createCodexRuntime({
       };
     });
     const { bundleId, runtime, version, build, asarSha256 } = compatibilityFacts;
-    // 所有inspect结果都必须携带bundle/runtime，否则启动动作会把undefined传给open。
-    const withBundleRuntime = (fields) => ({ ...fields, bundle, runtime });
-    const compatibilityFailure = compatibilityErrorCode({
+    const installedFacts = {
       bundleId,
       teamId: TEAM_ID,
       version,
       build,
       appAsarSha256: asarSha256,
       nodeMajor: runtime.major,
-    }, compatibility);
+    };
+    // 所有inspect结果都必须携带bundle/runtime，否则启动动作会把undefined传给open。
+    // 身份键只在worker内部用于核验本次会话的强兼容授权，不进入UI协议。
+    const withBundleRuntime = (fields) => ({
+      ...fields, bundle, runtime, compatibilityIdentity: compatibilityIdentityKey(installedFacts),
+    });
+    // 清单本身不命中时，只有本次会话已授权且身份键仍一致才放行；授权不改变签名与Node下限。
+    const listFailure = compatibilityErrorCode(installedFacts, compatibility);
+    const compatibilityFailure = listFailure === null ? null : forceCompatibilityErrorCode({
+      installed: installedFacts,
+      approved: compatibility,
+      authorizedKey: forceCompatibilityKey,
+    });
+    forceCompatibilityActive = listFailure !== null && compatibilityFailure === null;
     if (compatibilityFailure) {
       return withBundleRuntime({
         mode: compatibilityFailure === 'VERSION_UNSUPPORTED' ? 'incompatible' : 'unknown',
@@ -904,6 +922,16 @@ export function createCodexRuntime({
     async configureQuotaRefresh(refreshMinutes) {
       await quotaSettingsStore.save(refreshMinutes);
       quotaRefreshMinutes = refreshMinutes;
+    },
+    // 强兼容授权只能采纳本机实测算出的身份键，且只针对版本类失败；其余失败原样回报。
+    async grantForceCompatibility() {
+      const current = await inspect();
+      if (current.state.errorCode !== 'VERSION_UNSUPPORTED'
+        || typeof current.compatibilityIdentity !== 'string') {
+        return current;
+      }
+      forceCompatibilityKey = current.compatibilityIdentity;
+      return inspect();
     },
     async launch({ expectedFingerprint = null } = {}) {
       const current = await inspect();

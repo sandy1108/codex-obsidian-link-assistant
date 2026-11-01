@@ -47,6 +47,7 @@ struct AssistantState: Decodable, Equatable {
     let vaultName: String?
     let recommendedVaultRoot: String?
     let quotaRefreshMinutes: Int?
+    let forceCompatible: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case version = "v"
@@ -66,6 +67,7 @@ struct AssistantState: Decodable, Equatable {
         case vaultName
         case recommendedVaultRoot
         case quotaRefreshMinutes
+        case forceCompatible
     }
 }
 
@@ -145,7 +147,7 @@ enum WorkerProtocol {
             let optional: Set<String> = [
                 "codexVersion", "codexBuild", "port", "launchSource", "errorCode",
                 "vaultConfigured", "vaultRoot", "vaultName", "recommendedVaultRoot",
-                "quotaRefreshMinutes",
+                "quotaRefreshMinutes", "forceCompatible",
             ]
             guard exactKeys(object, required: required, optional: optional) else {
                 throw WorkerProtocolError.invalidMessage
@@ -249,6 +251,7 @@ enum WorkerAction: String {
     case shutdown
     case configureVault
     case configureQuotaRefresh
+    case forceCompatibility
 }
 
 struct WorkerActionAvailability: Equatable {
@@ -258,6 +261,7 @@ struct WorkerActionAvailability: Equatable {
     let canPause: Bool
     let canResume: Bool
     let canRestoreOrdinary: Bool
+    let canForceTry: Bool
 
     init(state: AssistantState?, workerRecoverable: Bool = false) {
         guard let state else {
@@ -268,11 +272,16 @@ struct WorkerActionAvailability: Equatable {
             canPause = false
             canResume = false
             canRestoreOrdinary = false
+            canForceTry = false
             return
         }
 
         let statusIsSafe = state.errorCode == nil && state.worker != .error && state.worker != .stopping
         canRefresh = state.worker != .stopping
+        // 强行兼容只在版本清单不命中时提供；签名与清单缺失一律不给入口，授权后也不再重复提供。
+        canForceTry = state.errorCode == "VERSION_UNSUPPORTED"
+            && state.forceCompatible != true
+            && state.worker != .stopping
         let vaultIsConfigured = state.vaultConfigured == true
         let endpointIsVerified = state.codex == .running && state.cdp == .verified
         let stoppedConsistent = state.codex == .stopped && state.cdp == .closed
@@ -300,7 +309,7 @@ enum WorkerErrorPresentation {
         case "EXTERNAL_PROCESS": return "当前 Codex 不是由本助手启动的；不能在助手内恢复。请从 Codex 自己的菜单正常退出。"
         case "CODEX_NOT_FOUND": return "找不到受支持的 Codex 安装。"
         case "SIGNATURE_MISMATCH": return "Codex 签名校验失败。"
-        case "VERSION_UNSUPPORTED": return "当前 Codex 版本未列入兼容清单。"
+        case "VERSION_UNSUPPORTED": return "当前 Codex 版本未列入兼容清单；可在上方选择「强行兼容一次」试跑。"
         case "COMPATIBILITY_MISSING": return "缺少兼容性清单，已停止操作。"
         case "VAULT_NOT_CONFIGURED": return "请先选择并保存 Obsidian 知识库目录。"
         case "VAULT_SETTINGS_INVALID": return "知识库配置文件无法读取，请重新选择目录并保存。"
@@ -435,6 +444,7 @@ final class AppModel: ObservableObject {
         case .pause: allowed = availability.canPause
         case .resume: allowed = availability.canResume
         case .restoreOrdinary: allowed = availability.canRestoreOrdinary
+        case .forceCompatibility: allowed = availability.canForceTry
         case .configureVault, .configureQuotaRefresh: allowed = false
         case .confirmRestart, .cancelConfirmation, .shutdown: allowed = false
         }

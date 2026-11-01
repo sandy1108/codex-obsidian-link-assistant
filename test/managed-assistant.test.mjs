@@ -12,10 +12,11 @@ const INITIAL_STATE = {
 
 function fakeRuntime({
   mode = 'ordinary-running', restoreAllowed = false, fingerprint = FINGERPRINT,
-  configureError = null, connectPageCount = 2,
+  configureError = null, connectPageCount = 2, incompatible = false, grantRefuseCode = null,
 } = {}) {
   const calls = [];
   let currentMode = mode;
+  let forced = false;
   return {
     calls,
     setMode(nextMode) { currentMode = nextMode; },
@@ -26,6 +27,16 @@ function fakeRuntime({
         : currentMode === 'cdp-ready'
           ? { ...INITIAL_STATE, cdp: 'verified', pageCount: 1, port: 9341 }
           : { ...INITIAL_STATE };
+      // 兼容清单不命中时真实runtime会早退：无进程指纹、codex/cdp未知。
+      if (incompatible) {
+        return {
+          mode: 'incompatible', restoreAllowed: false, processFingerprint: null,
+          state: {
+            ...state, codex: 'unknown', cdp: 'unknown',
+            errorCode: forced ? null : 'VERSION_UNSUPPORTED', forceCompatible: forced,
+          },
+        };
+      }
       return { mode: currentMode, restoreAllowed, processFingerprint: fingerprint, state };
     },
     async launch(options) {
@@ -70,6 +81,16 @@ function fakeRuntime({
     async configureQuotaRefresh(minutes) {
       calls.push(['configureQuotaRefresh', minutes]);
       return { state: { ...INITIAL_STATE, quotaRefreshMinutes: minutes } };
+    },
+    async grantForceCompatibility() {
+      calls.push('grantForceCompatibility');
+      forced = grantRefuseCode === null;
+      return {
+        state: {
+          ...INITIAL_STATE, codex: 'unknown', cdp: 'unknown',
+          errorCode: grantRefuseCode, forceCompatible: forced,
+        },
+      };
     },
   };
 }
@@ -355,4 +376,49 @@ test('shutdown is idempotent and only asks runtime to clean up this assistant', 
   await assistant.shutdown();
   await assistant.shutdown();
   assert.equal(runtime.calls.filter((call) => call === 'shutdown').length, 1);
+});
+
+test('一次性强兼容授权将版本闸门降为当前会话放行并存活于刷新', async () => {
+  const runtime = fakeRuntime({ mode: 'incompatible', incompatible: true });
+  const { assistant, emitted } = create(runtime);
+  await assistant.refresh();
+  assert.equal(emitted.at(-1).errorCode, 'VERSION_UNSUPPORTED');
+  assert.equal(emitted.at(-1).worker, 'error');
+  assert.equal(emitted.at(-1).forceCompatible, false);
+
+  const result = await assistant.dispatch(request('forceCompatibility'));
+  assert.deepEqual(result, { ok: true, code: 'force-compatibility-granted' });
+  assert.equal(runtime.calls.filter((call) => call === 'grantForceCompatibility').length, 1);
+  assert.equal(emitted.at(-1).forceCompatible, true);
+  assert.equal(emitted.at(-1).errorCode, null);
+  assert.equal(emitted.at(-1).worker, 'observing');
+
+  // 授权只在会话内存活：刷新不得重新出现兼容错误，也不得生成确认票据。
+  await assistant.refresh();
+  assert.equal(emitted.at(-1).forceCompatible, true);
+  assert.equal(emitted.at(-1).errorCode, null);
+  assert.equal(emitted.some((message) => message.type === 'confirmationRequired'), false);
+});
+
+test('强兼容授权不绕过签名与清单失败，失败后保持错误状态', async () => {
+  const runtime = fakeRuntime({ incompatible: true, grantRefuseCode: 'SIGNATURE_MISMATCH' });
+  const { assistant, emitted } = create(runtime);
+  await assert.rejects(
+    () => assistant.dispatch(request('forceCompatibility')),
+    (error) => error.code === 'SIGNATURE_MISMATCH',
+  );
+  assert.equal(emitted.at(-1).errorCode, 'SIGNATURE_MISMATCH');
+  assert.equal(emitted.at(-1).forceCompatible, false);
+  assert.equal(emitted.at(-1).worker, 'error');
+});
+
+test('runtime不支持强兼容时按状态不可用失败，不假装放行', async () => {
+  const runtime = fakeRuntime({ incompatible: true });
+  delete runtime.grantForceCompatibility;
+  const { assistant, emitted } = create(runtime);
+  await assert.rejects(
+    () => assistant.dispatch(request('forceCompatibility')),
+    (error) => error.code === 'STATE_UNAVAILABLE',
+  );
+  assert.equal(emitted.at(-1).forceCompatible, false);
 });

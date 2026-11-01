@@ -11,6 +11,9 @@ struct ContentView: View {
             header
             statusCard
             actionCard
+            if actions.canForceTry || model.state?.forceCompatible == true {
+                compatibilityCard
+            }
             vaultCard
             quotaCard
             if let errorMessage = model.errorMessage {
@@ -111,6 +114,39 @@ struct ContentView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 3)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary))
+    }
+
+    // 版本清单不命中时给一次性入口；授权后改为常驻提示，退出助手才恢复默认校验。
+    @ViewBuilder
+    private var compatibilityCard: some View {
+        let granted = model.state?.forceCompatible == true
+        VStack(alignment: .leading, spacing: 6) {
+            Label(
+                granted ? "正以未验证的 Codex 版本运行" : "当前 Codex 版本未列入兼容清单",
+                systemImage: granted ? "exclamationmark.triangle.fill" : "questionmark.circle"
+            )
+            .font(.caption)
+            .foregroundStyle(granted ? .orange : .secondary)
+            Text(granted
+                ? "本次会话已跳过版本清单比对；签名校验与调试入口可信检查仍然生效。退出助手后恢复默认校验。"
+                : "确认这是官方 Codex 更新后，可允许助手在本次会话内强行试跑一次；Codex 再次更新后授权自动失效。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if actions.canForceTry {
+                Button {
+                    model.perform(.forceCompatibility)
+                } label: {
+                    Label("强行兼容一次（仅本次会话）", systemImage: "hammer.fill")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.isActionPending || model.isWaitingToExit)
+            }
+        }
+        .padding(10)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary))
     }
@@ -535,6 +571,9 @@ struct ContentView: View {
     private var nextStepHint: String? {
         if model.isWaitingToExit { return "正在等待助手完成清理，请勿重复操作。" }
         guard let state = model.state else { return nil }
+        if state.errorCode == "VERSION_UNSUPPORTED" && state.forceCompatible != true {
+            return "可在上方允许助手在本次会话内强行兼容一次，验证这个新版本能不能用。"
+        }
         if state.errorCode != nil {
             return "出现错误后请先重新检查状态；具体原因已写入日志。"
         }
