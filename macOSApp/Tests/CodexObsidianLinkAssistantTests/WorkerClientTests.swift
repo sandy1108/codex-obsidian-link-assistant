@@ -18,6 +18,16 @@ private func decodedState(
 }
 
 final class WorkerClientTests: XCTestCase {
+    func testDecodesQuotaRefreshIntervalAndRejectsOutOfRangeValue() throws {
+        let valid = #"{"v":1,"type":"state","seq":1,"codex":"stopped","cdp":"closed","worker":"observing","pageCount":0,"quotaRefreshMinutes":12}"#
+        guard case .state(let state) = try WorkerProtocol.decode(Data(valid.utf8)) else {
+            return XCTFail("应解码额度刷新间隔")
+        }
+        XCTAssertEqual(state.quotaRefreshMinutes, 12)
+        let invalid = valid.replacingOccurrences(of: "\"quotaRefreshMinutes\":12", with: "\"quotaRefreshMinutes\":0")
+        XCTAssertThrowsError(try WorkerProtocol.decode(Data(invalid.utf8)))
+    }
+
     func testShutdownRequiresMatchingSuccessfulResultAndCleanProcessExit() {
         var evidence = WorkerShutdownEvidence()
         evidence.recordRequest(id: "request-1")

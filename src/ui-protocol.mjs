@@ -4,6 +4,7 @@ const CONFIRMATION_ID_PATTERN = /^[A-Za-z0-9_-]{32,128}$/u;
 const ACTIONS = new Set([
   'refresh', 'launch', 'connect', 'confirmRestart', 'cancelConfirmation',
   'pause', 'resume', 'restoreOrdinary', 'shutdown', 'configureVault',
+  'configureQuotaRefresh',
 ]);
 const CONFIRMATION_ACTIONS = new Set(['confirmRestart', 'cancelConfirmation']);
 
@@ -49,16 +50,21 @@ export function parseWorkerRequest(line) {
 
   const confirmationAction = CONFIRMATION_ACTIONS.has(request.action);
   const configureVaultAction = request.action === 'configureVault';
+  const configureQuotaAction = request.action === 'configureQuotaRefresh';
   const expectedKeys = confirmationAction
     ? ['v', 'type', 'id', 'action', 'confirmationId']
     : configureVaultAction
       ? ['v', 'type', 'id', 'action', 'vaultRoot']
+      : configureQuotaAction
+        ? ['v', 'type', 'id', 'action', 'refreshMinutes']
       : ['v', 'type', 'id', 'action'];
   if (!exactKeys(request, expectedKeys)
     || (confirmationAction && !hasValidConfirmationId(request.confirmationId))
     || (configureVaultAction && (typeof request.vaultRoot !== 'string'
       || request.vaultRoot.length > 8192 || !request.vaultRoot.startsWith('/')
-      || /[\u0000-\u001f\u007f]/u.test(request.vaultRoot)))) {
+      || /[\u0000-\u001f\u007f]/u.test(request.vaultRoot)))
+    || (configureQuotaAction && (!Number.isInteger(request.refreshMinutes)
+      || request.refreshMinutes < 1 || request.refreshMinutes > 60))) {
     throw protocolError('INVALID_REQUEST');
   }
   return request;
@@ -84,6 +90,7 @@ function validWorkerMessage(message) {
       const optional = [
         'codexVersion', 'codexBuild', 'port', 'launchSource', 'errorCode',
         'vaultConfigured', 'vaultRoot', 'vaultName', 'recommendedVaultRoot',
+        'quotaRefreshMinutes',
       ];
       return exactKeys(message, required, optional)
         && Number.isSafeInteger(message.seq) && message.seq >= 0
@@ -91,6 +98,9 @@ function validWorkerMessage(message) {
         && ['closed', 'verified', 'unknown'].includes(message.cdp)
         && ['observing', 'active', 'paused', 'stopping', 'error'].includes(message.worker)
         && Number.isInteger(message.pageCount) && message.pageCount >= 0 && message.pageCount <= 1000
+        && (message.quotaRefreshMinutes === undefined
+          || (Number.isInteger(message.quotaRefreshMinutes)
+            && message.quotaRefreshMinutes >= 1 && message.quotaRefreshMinutes <= 60))
         && (message.codexVersion === undefined || message.codexVersion === null
           || (typeof message.codexVersion === 'string' && /^\d+(?:\.\d+){1,4}$/u.test(message.codexVersion)))
         && (message.codexBuild === undefined || message.codexBuild === null

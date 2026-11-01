@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    @State private var quotaDraft = 5
 
     private var actions: WorkerActionAvailability { model.actionAvailability }
 
@@ -11,6 +12,7 @@ struct ContentView: View {
             statusCard
             actionCard
             vaultCard
+            quotaCard
             if let errorMessage = model.errorMessage {
                 errorBanner(errorMessage)
             }
@@ -25,7 +27,11 @@ struct ContentView: View {
         }
         .padding(16)
         .frame(width: 340)
-        .onAppear { model.refreshOnPopoverAppear() }
+        .onAppear {
+            quotaDraft = model.quotaRefreshMinutes
+            model.refreshOnPopoverAppear()
+        }
+        .onChange(of: model.quotaRefreshMinutes) { newValue in quotaDraft = newValue }
         .confirmationDialog(
             model.dialogTitle,
             isPresented: dialogPresentation,
@@ -197,6 +203,40 @@ struct ContentView: View {
                     .controlSize(.small)
                     .disabled(!model.canSaveVaultFolder)
             }
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary))
+    }
+
+    private var quotaCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("额度圆环", systemImage: "chart.donut")
+                .font(.callout.weight(.medium))
+            HStack(spacing: 8) {
+                Text("刷新间隔")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                TextField("分钟", value: $quotaDraft, format: .number)
+                    .frame(width: 35)
+                    .multilineTextAlignment(.trailing)
+                    .textFieldStyle(.roundedBorder)
+                Text("分钟")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Stepper("刷新间隔", value: $quotaDraft, in: 1...60)
+                    .labelsHidden()
+                    .fixedSize()
+                Button("保存") { model.saveQuotaRefreshMinutes(quotaDraft) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!(1...60).contains(quotaDraft) || quotaDraft == model.quotaRefreshMinutes
+                        || model.isActionPending || model.isWaitingToExit)
+            }
+            Text("默认每 5 分钟更新；侧栏圆环显示剩余额度。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))

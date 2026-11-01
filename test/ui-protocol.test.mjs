@@ -28,6 +28,7 @@ test('parses supported worker actions and requires a confirmation token only for
   assert.deepEqual(parseWorkerRequest(request('configureVault', { vaultRoot: '/Users/example/Notes' })), {
     v: 1, type: 'request', id: requestId, action: 'configureVault', vaultRoot: '/Users/example/Notes',
   });
+  assert.equal(parseWorkerRequest(request('configureQuotaRefresh', { refreshMinutes: 12 })).refreshMinutes, 12);
 });
 
 test('rejects malformed, unsupported, and extra-field requests', () => {
@@ -42,6 +43,10 @@ test('rejects malformed, unsupported, and extra-field requests', () => {
     request('configureVault', { vaultRoot: 'relative/path' }),
     request('configureVault', { vaultRoot: '/Users/example/Notes', extra: true }),
     request('configureVault', { vaultRoot: `/Users/${'a'.repeat(17000)}` }),
+    request('configureQuotaRefresh'),
+    request('configureQuotaRefresh', { refreshMinutes: 0 }),
+    request('configureQuotaRefresh', { refreshMinutes: 61 }),
+    request('configureQuotaRefresh', { refreshMinutes: 5, extra: true }),
     request('confirmRestart'),
     request('cancelConfirmation', { confirmationId, extra: true }),
     `${request('refresh')}\n{}`,

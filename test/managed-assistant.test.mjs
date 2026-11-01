@@ -67,6 +67,10 @@ function fakeRuntime({
         vaultConfigured: true, vaultRoot: options.vaultRoot, vaultName: 'Notes',
       } };
     },
+    async configureQuotaRefresh(minutes) {
+      calls.push(['configureQuotaRefresh', minutes]);
+      return { state: { ...INITIAL_STATE, quotaRefreshMinutes: minutes } };
+    },
   };
 }
 
@@ -93,6 +97,16 @@ test('startup refresh only observes and reports a safe state', async () => {
   assert.equal(emitted.at(-1).type, 'state');
   assert.equal(emitted.at(-1).worker, 'observing');
   assert.equal(Object.hasOwn(emitted.at(-1), 'processFingerprint'), false);
+});
+
+test('额度刷新间隔配置只更新状态，不改变Codex进程或连接', async () => {
+  const runtime = fakeRuntime();
+  const { assistant, emitted } = create(runtime);
+  const result = await assistant.dispatch(request('configureQuotaRefresh', undefined, { refreshMinutes: 12 }));
+  assert.deepEqual(result, { ok: true, code: 'quota-refresh-configured' });
+  assert.deepEqual(runtime.calls, [['configureQuotaRefresh', 12]]);
+  assert.equal(emitted.at(-1).quotaRefreshMinutes, 12);
+  assert.equal(emitted.at(-1).worker, 'observing');
 });
 
 test('saving a Vault updates the worker state without launching or restarting Codex', async () => {

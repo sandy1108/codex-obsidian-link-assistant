@@ -6,7 +6,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PRODUCT_NAME="Codex笔记链接助手"
 DIST_DIR="$REPO_ROOT/dist"
 APP_BUNDLE="$DIST_DIR/$PRODUCT_NAME.app"
-DMG_OUTPUT="$DIST_DIR/$PRODUCT_NAME-0.1.7-arm64.dmg"
+DMG_OUTPUT="$DIST_DIR/$PRODUCT_NAME-0.1.8-arm64.dmg"
 WORK_DIR=""
 MOUNT_POINT=""
 MOUNTED=0
@@ -52,7 +52,7 @@ mkdir -p "$STAGING" "$MOUNT_POINT"
 
 cat > "$STAGING/安装与恢复说明.txt" <<'NOTES'
 Codex笔记链接助手 · 安装与恢复
-版本：0.1.7（build 7），Apple Silicon测试包。
+版本：0.1.8（build 8），Apple Silicon测试包。
 
 安装
 1. 将“Codex笔记链接助手.app”拖到右侧“应用程序”快捷方式。
@@ -61,6 +61,7 @@ Codex笔记链接助手 · 安装与恢复
 
 使用
 - 启动后先显示本机状态。操作分两步：先点“启动Codex（CDP模式）”或“重启Codex为CDP模式”，再点“连接Codex CDP”启用链接增强；启动本身不注入。
+- Codex左侧窄栏显示5小时/周额度剩余百分比圆环；悬停可看重置时间。浮窗可设置刷新间隔，默认5分钟。
 - 连接后若显示“已连接·暂无聊天页”，表示调试入口已连上但当前没有可注入页面，打开一个对话后会自动启用。
 - 如果需要正常退出正在运行的普通Codex，助手会先显示确认；请先保存未完成任务。取消不会退出Codex。
 - “暂停增强”会移除本工具注入的按钮；“退出”或Cmd+Q会先请求清理，Codex继续运行。

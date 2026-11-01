@@ -178,7 +178,8 @@ final class WorkerClient: ObservableObject {
     }
 
     @discardableResult
-    func send(_ action: WorkerAction, confirmationID: String? = nil, vaultRoot: String? = nil) -> String? {
+    func send(_ action: WorkerAction, confirmationID: String? = nil, vaultRoot: String? = nil,
+              refreshMinutes: Int? = nil) -> String? {
         guard connectionState == .ready,
               let child = process, child.isRunning,
               let inputPipe,
@@ -194,6 +195,7 @@ final class WorkerClient: ObservableObject {
 
         let confirmationActions: Set<WorkerAction> = [.confirmRestart, .cancelConfirmation]
         let vaultConfigurationActions: Set<WorkerAction> = [.configureVault]
+        let quotaConfigurationActions: Set<WorkerAction> = [.configureQuotaRefresh]
         let validVaultRoot = vaultRoot.map { root -> Bool in
             root.hasPrefix("/")
                 && root.utf8.count <= 8192
@@ -201,6 +203,8 @@ final class WorkerClient: ObservableObject {
         } ?? false
         guard confirmationActions.contains(action) == (confirmationID != nil),
               vaultConfigurationActions.contains(action) == (vaultRoot != nil),
+              quotaConfigurationActions.contains(action) == (refreshMinutes != nil),
+              refreshMinutes.map({ (1...60).contains($0) }) ?? true,
               vaultRoot == nil || validVaultRoot else {
             lastErrorMessage = "请求参数不符合助手协议。"
             AssistantFileLog.append("ui-action-blocked", "action=\(action.rawValue) reason=invalid-parameters")
@@ -216,6 +220,7 @@ final class WorkerClient: ObservableObject {
         ]
         if let confirmationID { request["confirmationId"] = confirmationID }
         if let vaultRoot { request["vaultRoot"] = vaultRoot }
+        if let refreshMinutes { request["refreshMinutes"] = refreshMinutes }
 
         do {
             var line = try JSONSerialization.data(withJSONObject: request)

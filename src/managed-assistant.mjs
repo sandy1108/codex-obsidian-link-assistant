@@ -45,6 +45,9 @@ function normalizedState(source = {}) {
     vaultRoot: stringOrNull(source.vaultRoot),
     vaultName: stringOrNull(source.vaultName),
     recommendedVaultRoot: stringOrNull(source.recommendedVaultRoot),
+    quotaRefreshMinutes: Number.isInteger(source.quotaRefreshMinutes)
+      && source.quotaRefreshMinutes >= 1 && source.quotaRefreshMinutes <= 60
+      ? source.quotaRefreshMinutes : 5,
     errorCode: FIXED_ERROR_CODES.has(source.errorCode) ? source.errorCode : null,
   };
 }
@@ -327,6 +330,19 @@ export function createManagedAssistant({ runtime, clock = Date.now, tokenFactory
     }
   }
 
+  async function configureQuotaRefreshImpl(request) {
+    if (shutdownComplete) throw assistantError('WORKER_STOPPING');
+    try {
+      if (typeof runtime.configureQuotaRefresh !== 'function') throw assistantError('STATE_UNAVAILABLE');
+      await runtime.configureQuotaRefresh(request.refreshMinutes);
+      current.quotaRefreshMinutes = request.refreshMinutes;
+      await publishState();
+      return { ok: true, code: 'quota-refresh-configured' };
+    } catch {
+      return { ok: false, code: 'quota-settings-write-failed' };
+    }
+  }
+
   async function shutdownImpl() {
     if (shutdownComplete) return { ok: true, code: 'shutdown' };
     shutdownComplete = true;
@@ -366,6 +382,7 @@ export function createManagedAssistant({ runtime, clock = Date.now, tokenFactory
     resume: (request) => enqueue(resumeImpl, request),
     restoreOrdinary: (request) => enqueue(restoreOrdinaryImpl, request),
     configureVault: (request) => enqueue(configureVaultImpl, request),
+    configureQuotaRefresh: (request) => enqueue(configureQuotaRefreshImpl, request),
     shutdown: (request) => enqueue(shutdownImpl, request),
   };
 }

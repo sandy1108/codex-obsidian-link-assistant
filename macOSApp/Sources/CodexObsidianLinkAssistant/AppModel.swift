@@ -46,6 +46,7 @@ struct AssistantState: Decodable, Equatable {
     let vaultRoot: String?
     let vaultName: String?
     let recommendedVaultRoot: String?
+    let quotaRefreshMinutes: Int?
 
     private enum CodingKeys: String, CodingKey {
         case version = "v"
@@ -64,6 +65,7 @@ struct AssistantState: Decodable, Equatable {
         case vaultRoot
         case vaultName
         case recommendedVaultRoot
+        case quotaRefreshMinutes
     }
 }
 
@@ -143,6 +145,7 @@ enum WorkerProtocol {
             let optional: Set<String> = [
                 "codexVersion", "codexBuild", "port", "launchSource", "errorCode",
                 "vaultConfigured", "vaultRoot", "vaultName", "recommendedVaultRoot",
+                "quotaRefreshMinutes",
             ]
             guard exactKeys(object, required: required, optional: optional) else {
                 throw WorkerProtocolError.invalidMessage
@@ -157,6 +160,7 @@ enum WorkerProtocol {
                   state.errorCode.map({ isErrorCode($0) }) ?? true,
                   optionalAbsolutePathIsValid(state.vaultRoot),
                   optionalAbsolutePathIsValid(state.recommendedVaultRoot),
+                  state.quotaRefreshMinutes.map({ (1...60).contains($0) }) ?? true,
                   state.vaultName.map({ $0.count <= 255 }) ?? true else {
                 throw WorkerProtocolError.invalidMessage
             }
@@ -244,6 +248,7 @@ enum WorkerAction: String {
     case restoreOrdinary
     case shutdown
     case configureVault
+    case configureQuotaRefresh
 }
 
 struct WorkerActionAvailability: Equatable {
@@ -301,6 +306,7 @@ enum WorkerErrorPresentation {
         case "VAULT_SETTINGS_INVALID": return "知识库配置文件无法读取，请重新选择目录并保存。"
         case "VAULT_DIRECTORY_INVALID": return "所选目录不是可用的 Obsidian 知识库，请检查其中是否有 .obsidian 目录。"
         case "VAULT_SETTINGS_WRITE_FAILED": return "知识库配置没有成功保存，请检查助手目录权限。"
+        case "QUOTA_SETTINGS_WRITE_FAILED": return "额度刷新间隔没有保存成功，请检查助手目录权限。"
         case "VAULT_APPLY_FAILED": return "新知识库应用失败，增强已暂停；请检查设置后重试。"
         case "PROCESS_AMBIGUOUS": return "检测到多个 Codex 进程，无法安全操作。"
         case "CDP_UNTRUSTED": return "无法验证 Codex 调试端点（端口未监听或进程不匹配）。请退出 Codex 后重新启动。"
@@ -351,6 +357,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isActionPending = false
     @Published private(set) var isWaitingToExit = false
     @Published private(set) var draftVaultRoot = ""
+    @Published private(set) var quotaRefreshMinutes = 5
     @Published private(set) var confirmationSecondsRemaining: Int?
 
     private let workerClient: WorkerClient
@@ -428,7 +435,7 @@ final class AppModel: ObservableObject {
         case .pause: allowed = availability.canPause
         case .resume: allowed = availability.canResume
         case .restoreOrdinary: allowed = availability.canRestoreOrdinary
-        case .configureVault: allowed = false
+        case .configureVault, .configureQuotaRefresh: allowed = false
         case .confirmRestart, .cancelConfirmation, .shutdown: allowed = false
         }
         guard allowed else {
@@ -537,6 +544,12 @@ final class AppModel: ObservableObject {
         synchronizeFromWorker()
     }
 
+    func saveQuotaRefreshMinutes(_ minutes: Int) {
+        guard (1...60).contains(minutes), !isActionPending, !isWaitingToExit else { return }
+        guard workerClient.send(.configureQuotaRefresh, refreshMinutes: minutes) != nil else { return }
+        synchronizeFromWorker()
+    }
+
     var canSaveVaultFolder: Bool {
         guard !draftVaultRoot.isEmpty && !isActionPending && !isWaitingToExit else { return false }
         guard let state else { return true }
@@ -619,6 +632,7 @@ final class AppModel: ObservableObject {
     private func synchronizeFromWorker() {
         state = workerClient.state
         if let state {
+            quotaRefreshMinutes = state.quotaRefreshMinutes ?? 5
             if !vaultDraftChanged {
                 draftVaultRoot = state.vaultConfigured == true
                     ? (state.vaultRoot ?? "")

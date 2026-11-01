@@ -21,6 +21,9 @@ import { restorePrecondition } from './restore-policy.mjs';
 import { createLogWriter } from './log-file.mjs';
 import { readCompatibilityManifest } from './compatibility-file.mjs';
 import { createLaunchOwnershipStore, isOwnedVerifiedProcess } from './launch-ownership.mjs';
+import { createQuotaSettingsStore } from './quota-settings.mjs';
+import { readQuotaSnapshot } from './quota.mjs';
+import { buildQuotaRendererSource } from './quota-renderer.mjs';
 
 const execFileAsync = promisify(execFile);
 function runtimeError(code) {
@@ -323,6 +326,8 @@ async function attachTarget(target, port, vaultRoot, vaultSettingsStore, targetR
   const worldName = 'codex-obsidian-link-assistant-v1';
   const bindingName = `openObsidianNote${randomBytes(6).toString('hex')}`;
   const executionContexts = new Set();
+  let lastQuotaContextId = null;
+  let lastQuotaJson = '';
   let mainFrameId = '';
   let scriptId = null;
   session.on('Runtime.executionContextCreated', ({ context }) => {
@@ -351,7 +356,7 @@ async function attachTarget(target, port, vaultRoot, vaultSettingsStore, targetR
       });
     });
     await session.send('Runtime.addBinding', { name: bindingName, executionContextName: worldName });
-    const source = buildRendererSource({ bindingName, vaultRoot });
+    const source = `${buildRendererSource({ bindingName, vaultRoot })}\n${buildQuotaRendererSource()}`;
     const registered = await session.send('Page.addScriptToEvaluateOnNewDocument', {
       source,
       worldName,
@@ -368,7 +373,7 @@ async function attachTarget(target, port, vaultRoot, vaultSettingsStore, targetR
   } catch (error) {
     const contextId = [...executionContexts][0];
     if (contextId) {
-      try { await session.evaluate('window.__codexObsidianLinkAssistantV1?.cleanup?.()', contextId); } catch {}
+      try { await session.evaluate('window.__codexObsidianLinkAssistantV1?.cleanup?.(); window.__codexQuotaRingsV1?.cleanup?.()', contextId); } catch {}
     }
     if (scriptId) {
       try { await session.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: scriptId }); } catch {}
@@ -380,11 +385,22 @@ async function attachTarget(target, port, vaultRoot, vaultSettingsStore, targetR
 
   return {
     session,
+    async updateQuota(snapshot) {
+      const contextId = [...executionContexts][0];
+      if (!contextId) return;
+      const json = JSON.stringify(snapshot);
+      if (contextId === lastQuotaContextId && json === lastQuotaJson) return;
+      try {
+        await session.evaluate(`window.__codexQuotaRingsV1?.setQuota(${json})`, contextId);
+        lastQuotaContextId = contextId;
+        lastQuotaJson = json;
+      } catch { /* 页面导航时旧context可能失效；下轮supervisor会重试 */ }
+    },
     async cleanup() {
       if (executionContexts.size) {
         const contextId = [...executionContexts][0];
         try {
-          await session.evaluate('window.__codexObsidianLinkAssistantV1?.cleanup?.()', contextId);
+          await session.evaluate('window.__codexObsidianLinkAssistantV1?.cleanup?.(); window.__codexQuotaRingsV1?.cleanup?.()', contextId);
         } catch { /* 页面关闭时CDP无法再访问原上下文 */ }
       }
       if (scriptId) {
@@ -428,6 +444,7 @@ function waitForInterval(milliseconds, signal) {
 
 async function supervise(bundle, runtime, port, {
   signal = null, onFirstPass = () => {}, vaultSettingsStore,
+  quotaSettingsStore = createQuotaSettingsStore({ stateRoot: ASSISTANT_STATE_ROOT }),
 } = {}) {
   await log('assistant-starting', `codex=${await bundleValue(bundle, 'CFBundleShortVersionString')} port=${port}`);
   notify('正在连接Codex页面…');
@@ -435,6 +452,9 @@ async function supervise(bundle, runtime, port, {
   let consecutiveErrors = 0;
   let firstPass = false;
   let codexExited = false;
+  let lastQuotaPoll = 0;
+  let quotaSnapshot = null;
+  const cliPath = path.join(bundle, 'Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex');
   while (!stopping && !signal?.aborted) {
     try {
       const snapshot = await processSnapshot();
@@ -462,6 +482,18 @@ async function supervise(bundle, runtime, port, {
           );
           if (record) sessions.set(target.id, record);
         } catch { await log('target-rejected', 'reason=probe-or-injection-failed'); }
+      }
+      if (sessions.size) {
+        const { refreshMinutes } = await quotaSettingsStore.read();
+        if (Date.now() - lastQuotaPoll >= refreshMinutes * 60_000) {
+          lastQuotaPoll = Date.now();
+          try { quotaSnapshot = await readQuotaSnapshot(cliPath); }
+          catch {
+            quotaSnapshot = null;
+            await appendAssistantLog('quota-read-failed');
+          }
+        }
+        for (const record of sessions.values()) await record.updateQuota(quotaSnapshot);
       }
       if (sessions.size) {
         if (consecutiveErrors) notify('Codex笔记链接已恢复。');
@@ -576,6 +608,7 @@ function processFingerprint(process, executable, port) {
 function runtimeState({
   codex, cdp, pageCount = 0, version, build, port = null, launchSource, errorCode = null,
   vaultConfigured = false, vaultRoot = null, vaultName = null, recommendedVaultRoot = null,
+  quotaRefreshMinutes = 5,
 }) {
   return {
     codex,
@@ -590,6 +623,7 @@ function runtimeState({
     vaultRoot,
     vaultName,
     recommendedVaultRoot,
+    quotaRefreshMinutes,
   };
 }
 
@@ -607,12 +641,14 @@ async function getOneProcess(executable) {
 export function createCodexRuntime({
   compatibility,
   vaultSettingsStore = createVaultSettingsStore({ stateRoot: ASSISTANT_STATE_ROOT }),
+  quotaSettingsStore = createQuotaSettingsStore({ stateRoot: ASSISTANT_STATE_ROOT }),
   launchOwnershipStore = createLaunchOwnershipStore({ stateRoot: ASSISTANT_STATE_ROOT }),
   onSupervisorExit = null,
 } = {}) {
   let managedProcessFingerprint = null;
   let managedSupervisor = null;
   let vaultSettings = null;
+  let quotaRefreshMinutes = 5;
 
   function stateFor(fields) {
     const selectedVaultRoot = vaultSettings?.vaultRoot ?? null;
@@ -623,11 +659,13 @@ export function createCodexRuntime({
       vaultRoot: selectedVaultRoot,
       vaultName: vaultSettings?.vaultName ?? null,
       recommendedVaultRoot: vaultSettings?.recommendedVaultRoot ?? null,
+      quotaRefreshMinutes,
     });
   }
 
   async function inspect() {
     vaultSettings = await vaultSettingsStore.read();
+    quotaRefreshMinutes = (await quotaSettingsStore.read()).refreshMinutes;
     let bundle;
     try { bundle = await findCodexBundle(); } catch { throw runtimeError('CODEX_NOT_FOUND'); }
     const plistPath = path.join(bundle, 'Contents/Info.plist');
@@ -746,6 +784,7 @@ export function createCodexRuntime({
         markReady();
       },
       vaultSettingsStore,
+      quotaSettingsStore,
     }).catch(async (error) => {
       try { await log('supervisor-failed', `code=${error?.code ?? 'unexpected-error'}`); } catch { /* 日志失败不覆盖原错误 */ }
       rejectReady(error);
@@ -862,6 +901,10 @@ export function createCodexRuntime({
 
   return {
     inspect,
+    async configureQuotaRefresh(refreshMinutes) {
+      await quotaSettingsStore.save(refreshMinutes);
+      quotaRefreshMinutes = refreshMinutes;
+    },
     async launch({ expectedFingerprint = null } = {}) {
       const current = await inspect();
       if (!current.state.vaultConfigured) throw runtimeError('VAULT_NOT_CONFIGURED');
