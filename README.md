@@ -28,7 +28,7 @@
 在Finder中依次打开：
 
 1. `bin/build-menu-app.command`：构建 `dist/Codex笔记链接助手.app`。
-2. `bin/build-dmg.command`：生成 `dist/Codex笔记链接助手-0.1.9-arm64.dmg`。
+2. `bin/build-dmg.command`：生成 `dist/Codex笔记链接助手-0.1.10-arm64.dmg`。
 
 脚本拒绝覆盖已有产物。DMG只包含App、“应用程序”快捷方式和安装/恢复说明；构建不会安装App、替换现有桌面入口或设置登录项。
 
