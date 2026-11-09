@@ -1,8 +1,8 @@
 {
   "bundleId": "com.openai.codex",
   "teamId": "2DC432GLL2",
-  "version": "26.1027.30824",
-  "build": "22943",
-  "appAsarSha256": "36bf3d2b35e95e11852074b9ca9459b89efbecd6b8311345d060cf66de8f0ba6",
+  "version": "26.1027.51404",
+  "build": "23880",
+  "appAsarSha256": "52e0a65f9fea51f4287bbd98c63343761f9424517bb793652bb554764bc0bcc8",
   "minimumNodeMajor": 24
 }
